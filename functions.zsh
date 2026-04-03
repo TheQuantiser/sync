@@ -1586,365 +1586,55 @@ cvmfs_restart() {
 }
 
 # hsparse() {
-#   [ -n "${BASH_VERSION:-}${ZSH_VERSION:-}" ] || { printf 'hsparse: requires bash or zsh\n' >&2; return 2; }
-#   [ -n "${ZSH_VERSION:-}" ] && setopt localoptions nonomatch
-
-#   local repo="" branch="" commit="" dest="" paths_csv=""
-#   local use_ssh=0 add_mode=0 quiet=0 verify=0 lfs=0
-#   local export_fmt="" out_name="" script_file="" paths_file="" paths_from=""
-#   local -a qflagv=()
-
-#   if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-#     printf '%s\n' "hsparse: sparse clone/extract for GitHub (bash/zsh)
-# Usage: hsparse -r OWNER/REPO|URL -p PATH[,PATH2...] [opts]
-#   -r/--repo REPO   -p/--paths CSV (or --paths-file/--paths-from)
-#   -b/--branch BR   -c/--commit SHA
-#   -d/--dest DIR    -S/--ssh
-#   -A/--add|--update -q/--quiet --verify --lfs
-#   --export {tar|zip|dir} -o/--out NAME --script FILE
-#   (Git >= 2.25 required)" >&2
-#     return 2
-#   fi
-
-#   while [ $# -gt 0 ]; do
-#     case "$1" in
-#       -r|--repo) repo=$2; shift 2 ;;
-#       -p|--paths) paths_csv="${paths_csv:+$paths_csv,}$2"; shift 2 ;;
-#       --paths-file) paths_file=$2; shift 2 ;;
-#       --paths-from) paths_from=$2; shift 2 ;;
-#       -b|--branch) branch=$2; shift 2 ;;
-#       -c|--commit) commit=$2; shift 2 ;;
-#       -d|--dest) dest=$2; shift 2 ;;
-#       -S|--ssh) use_ssh=1; shift ;;
-#       -A|--add|--update) add_mode=1; shift ;;
-#       -q|--quiet) quiet=1; qflagv=(-q); shift ;;
-#       --verify) verify=1; shift ;;
-#       --lfs) lfs=1; shift ;;
-#       --export) export_fmt=$2; shift 2 ;;
-#       -o|--out) out_name=$2; shift 2 ;;
-#       --script) script_file=$2; shift 2 ;;
-#       --) shift; break ;;
-#       *) printf 'hsparse: unknown option: %s\n' "$1" >&2; return 2 ;;
-#     esac
-#   done
-
-#   command -v git >/dev/null 2>&1 || { printf 'hsparse: git not found\n' >&2; return 127; }
-
-#   # ---- version check (pure shell, zsh-safe) ----
-#   _vn() { local v=${1%%[^0-9.]*} a b c d; a=${v%%.*}; v=${v#*.}
-#           if [ "$a" = "$v" ]; then printf '%s.%s.%s.%s\n' "${a:-0}" 0 0 0; return; fi
-#           b=${v%%.*}; v=${v#*.}
-#           if [ "$b" = "$v" ]; then printf '%s.%s.%s.%s\n' "${a:-0}" "${b:-0}" 0 0; return; fi
-#           c=${v%%.*}
-#           if [ "$c" = "$v" ]; then printf '%s.%s.%s.%s\n' "${a:-0}" "${b:-0}" "${c:-0}" 0; return; fi
-#           v=${v#*.}; d=${v%%.*}; printf '%s.%s.%s.%s\n' "${a:-0}" "${b:-0}" "${c:-0}" "${d:-0}"; }
-#     _git_ver_ge() {  # return 0 if $1 >= $2
-#       local v1 v2 a1 b1 c1 d1 a2 b2 c2 d2
-#       v1=${1%%[^0-9.]*}; v2=${2%%[^0-9.]*}  # strip any suffixes like .windows.1
-#       { local IFS=.; read -r a1 b1 c1 d1 <<<"$v1"; }
-#       { local IFS=.; read -r a2 b2 c2 d2 <<<"$v2"; }
-#       a1=${a1:-0}; b1=${b1:-0}; c1=${c1:-0}; d1=${d1:-0}
-#       a2=${a2:-0}; b2=${b2:-0}; c2=${c2:-0}; d2=${d2:-0}
-#       if   [ "$a1" -gt "$a2" ]; then return 0; elif [ "$a1" -lt "$a2" ]; then return 1; fi
-#       if   [ "$b1" -gt "$b2" ]; then return 0; elif [ "$b1" -lt "$b2" ]; then return 1; fi
-#       if   [ "$c1" -gt "$c2" ]; then return 0; elif [ "$c1" -lt "$c2" ]; then return 1; fi
-#       [ "$d1" -ge "$d2" ]
-#     }
-
-#     # minimal wrapper stays the same:
-#     local _min_git='2.25.0' gitv
-#     gitv=$(git version | sed -E 's/.* ([0-9]+(\.[0-9]+){1,}).*/\1/')
-#     if ! _git_ver_ge "$gitv" "$_min_git"; then
-#       printf 'hsparse: need Git >= %s (found %s)\n' "$_min_git" "$gitv" >&2
-#       return 2
-#     fi
-
-
-#   [ -n "$repo" ] || { printf 'hsparse: missing --repo\n' >&2; return 2; }
-
-#   # ---- paths ingest ----
-#   if [ -n "$paths_file" ]; then
-#     [ -f "$paths_file" ] || { printf 'hsparse: --paths-file not found\n' >&2; return 2; }
-#     local pf; pf=$(sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' "$paths_file" | tr -d '\r' | paste -sd, -)
-#     paths_csv="${paths_csv:+$paths_csv,}$pf"
-#   fi
-#   if [ -n "$paths_from" ]; then
-#     if [ "$paths_from" = "-" ]; then
-#       local ps; ps=$(sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' | tr -d '\r' | paste -sd, -)
-#       paths_csv="${paths_csv:+$paths_csv,}$ps"
-#     else
-#       [ -f "$paths_from" ] || { printf 'hsparse: --paths-from file not found\n' >&2; return 2; }
-#       local pg; pg=$(sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' "$paths_from" | tr -d '\r' | paste -sd, -)
-#       paths_csv="${paths_csv:+$paths_csv,}$pg"
-#     fi
-#   fi
-#   [ -n "$paths_csv" ] || { printf 'hsparse: missing --paths (or file/stdin)\n' >&2; return 2; }
-#   paths_csv=${paths_csv//, /,}; paths_csv=${paths_csv// ,/,}; paths_csv=${paths_csv#,}; paths_csv=${paths_csv%,}
-#   [ -n "$export_fmt" ] && case "$export_fmt" in tar|zip|dir) ;; *) printf 'hsparse: --export must be tar|zip|dir\n' >&2; return 2;; esac
-
-#   # ---- URL & dest ----
-#   local url="$repo" owner_repo="" reponame=""
-#   case "$repo" in
-#     https://github.com/*)
-#       owner_repo=${repo#https://github.com/}; owner_repo=${owner_repo%.git}; owner_repo=${owner_repo%/}
-#       if [ $use_ssh -eq 1 ]; then url="git@github.com:${owner_repo}.git"; else case "$repo" in *.git) url="$repo";; *) url="${repo%/}.git";; esac; fi ;;
-#     git@github.com:*) owner_repo=${repo#git@github.com:}; owner_repo=${owner_repo%.git}; owner_repo=${owner_repo%/}; url="$repo" ;;
-#     */*) owner_repo=${repo%.git}; owner_repo=${owner_repo%/}; if [ $use_ssh -eq 1 ]; then url="git@github.com:${owner_repo}.git"; else url="https://github.com/${owner_repo}.git"; fi ;;
-#     *) printf 'hsparse: --repo must be OWNER/REPO or a GitHub URL\n' >&2; return 2 ;;
-#   esac
-#   reponame=${owner_repo##*/}; [ -n "$dest" ] || dest="$reponame"; [ -n "$out_name" ] || out_name="$dest"
-
-#   # ---- helpers ----
-#   _hs_trim(){ local s=$1; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
-#   _hs_split_csv(){ # print NUL-terminated normalized tokens
-#     local csv=$1 p
-#     if [ -n "${ZSH_VERSION:-}" ]; then
-#       local -a raw; raw=("${(s:,:)csv}")
-#       for p in "${raw[@]}"; do p=$(_hs_trim "$p"); p=${p#./}; [ -n "$p" ] && printf '%s\0' "$p"; done
-#     else
-#       local -a raw=(); IFS=, read -r -a raw <<<"$csv"
-#       for p in "${raw[@]}"; do p=$(_hs_trim "$p"); p=${p#./}; [ -n "$p" ] && printf '%s\0' "$p"; done
-#     fi
-#   }
-#   _hs_build_paths_argv(){ _hs_split_csv "$1"; }
-#   _hs_lfs_include_from_paths(){
-#     local csv=$1 p; local -a raw inc=()
-#     if [ -n "${ZSH_VERSION:-}" ]; then raw=("${(s:,:)csv}"); else IFS=, read -r -a raw <<<"$csv"; fi
-#     for p in "${raw[@]}"; do
-#       p=$(_hs_trim "$p"); p=${p#./}; [ -z "$p" ] && continue
-#       if [ -d "$p" ] || [[ "$p" == */ ]]; then inc+=("${p%/}/**")
-#       else if git cat-file -e "HEAD:$p" 2>/dev/null && git ls-tree -d HEAD -- "$p" >/dev/null 2>&1; then inc+=("${p%/}/**"); else inc+=("$p"); fi
-#       fi
-#     done; (IFS=','; printf '%s' "${inc[*]}")
-#   }
-#   _hs_load_paths_array(){
-#     local __var="$1" __csv="$2"
-#     if [ -n "${BASH_VERSION:-}" ]; then
-#       local -a __tmp=(); mapfile -d '' -t __tmp < <(_hs_build_paths_argv "$__csv"); eval "$__var=()"; eval "$__var+=(\"\${__tmp[@]}\")"
-#     else
-#       eval "$__var=()"; local __p; while IFS= read -r -d '' __p; do eval "$__var+=(\"\$__p\")"; done < <(_hs_build_paths_argv "$__csv")
-#     fi
-#   }
-#   _q(){ printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"; }
-
-#   # ---- reproducible script (Bash 3.2+ compatible) ----
-#   if [ -n "$script_file" ]; then
-#     umask 022
-#     {
-#       printf '#!/usr/bin/env bash\nset -e\n'
-#       printf 'repo_url=%s\n' "$(_q "$url")"
-#       printf 'dest=%s\n'     "$(_q "$dest")"
-#       printf 'branch=%s\n'   "$(_q "$branch")"
-#       printf 'commit=%s\n'   "$(_q "$commit")"
-#       printf 'paths=%s\n'    "$(_q "$paths_csv")"
-#       printf 'export_fmt=%s\n' "$(_q "$export_fmt")"
-#       printf 'out_name=%s\n' "$(_q "$out_name")"
-#       printf 'lfs=%s\n'      "$(_q "$lfs")"
-#       printf 'quiet=%s\n'    "$(_q "$quiet")"
-#       cat <<'EOS'
-# qflagv=(); [ "$quiet" -eq 1 ] && qflagv=(-q)
-# _trim(){ local s=$1; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf "%s" "$s"; }
-# _build_paths_argv(){ IFS=, read -r -a r <<<"$1"; local p a=(); for p in "${r[@]}"; do p=$(_trim "$p"); p=${p#./}; [ -n "$p" ] && a+=("$p"); done; printf "%s\0" "${a[@]}"; }
-# _lfs_inc(){ IFS=, read -r -a r <<<"$1"; local p a=(); for p in "${r[@]}"; do p=$(_trim "$p"); p=${p#./}; [ -z "$p" ] && continue; if [ -d "$p" ] || [[ "$p" == */ ]]; then a+=("${p%%/}/**"); elif git cat-file -e "HEAD:$p" 2>/dev/null && git ls-tree -d HEAD -- "$p" >/dev/null 2>&1; then a+=("${p%%/}/**"); else a+=("$p"); fi; done; (IFS=,; printf "%s" "${a[*]}"); }
-# if [ -d "$dest/.git" ]; then cd "$dest"; else
-#   git clone --filter=blob:none --sparse --depth 1 "${qflagv[@]}" ${branch:+--branch "$branch"} "$repo_url" "$dest"
-#   cd "$dest"; git sparse-checkout init --no-cone
-# fi
-# if command -v mapfile >/dev/null 2>&1; then mapfile -d '' -t _p < <(_build_paths_argv "$paths")
-# else _p=(); while IFS= read -r -d '' __x; do _p+=("$__x"); done < <(_build_paths_argv "$paths"); fi
-# [ ${#_p[@]} -gt 0 ] || { echo "hsparse(script): no valid paths after normalization" >&2; exit 2; }
-# git sparse-checkout set -- "${_p[@]}"
-# if [ -n "$commit" ]; then
-#   git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$commit" 2>/dev/null || true
-#   if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-#     [ -n "$branch" ] || { echo "hsparse(script): remote refused SHA fetch; provide --branch" >&2; exit 2; }
-#     git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$branch"
-#     deepen=50; max=1048576
-#     while ! git cat-file -e "$commit^{commit}" 2>/dev/null; do
-#       [ $deepen -le $max ] || { echo "hsparse(script): commit not found within deepen cap" >&2; exit 2; }
-#       git fetch "${qflagv[@]}" --filter=blob:none --deepen=$deepen origin "$branch"; deepen=$(( deepen * 2 ))
-#     done
-#   fi
-#   git checkout "${qflagv[@]}" --detach "$commit"
-# elif [ -n "$branch" ]; then
-#   git switch "${qflagv[@]}" "$branch" 2>/dev/null || git switch "${qflagv[@]}" -c "$branch" --track "origin/$branch" 2>/dev/null || git checkout "${qflagv[@]}" "$branch" || git checkout "${qflagv[@]}" -b "$branch" --track "origin/$branch"
-# fi
-# [ "$lfs" -eq 1 ] && command -v git-lfs >/dev/null 2>&1 && git lfs pull --include="$(_lfs_inc "$paths")" --exclude=""
-# case "$export_fmt" in
-#   tar) tar --exclude=.git -czf "${out_name%%.tar.gz}.tar.gz" -C . . ;;
-#   zip) command -v zip >/dev/null 2>&1 || { echo "zip not found" >&2; exit 2; }; zip -qr "${out_name%%.zip}.zip" . -x ".git/*" ;;
-#   dir) if command -v rsync >/dev/null 2>&1; then rsync -a --delete --exclude=.git ./ "${out_name}/"; else mkdir -p "${out_name}"; tar --exclude=.git -cf - . | (cd "${out_name}" && tar -xf -); fi ;;
-#   "") ;;
-#   *) echo "bad export fmt" >&2; exit 2 ;;
-# esac
-# EOS
-#     } >"$script_file" || { printf 'hsparse: failed to write script\n' >&2; return 1; }
-#     chmod +x "$script_file" || true
-#     [ $quiet -eq 1 ] || printf 'Wrote reproducible script: %s\n' "$script_file"
-#   fi
-
-#   # ---- operate ----
-#   if [ -d "$dest/.git" ]; then
-#     [ $add_mode -eq 1 ] || { printf 'hsparse: destination "%s" exists. Use --add or choose --dest.\n' "$dest" >&2; return 2; }
-#     (
-#       cd "$dest" || exit 1
-#       if [ -n "$branch" ]; then
-#         git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$branch" || exit 1
-#         git switch "${qflagv[@]}" "$branch" 2>/dev/null || git switch "${qflagv[@]}" -c "$branch" --track "origin/$branch" 2>/dev/null || git checkout "${qflagv[@]}" "$branch" 2>/dev/null || git checkout "${qflagv[@]}" -b "$branch" --track "origin/$branch" || exit 1
-#       fi
-#       [ -n "$commit" ] && git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$commit" 2>/dev/null || true
-#       git sparse-checkout init --no-cone >/dev/null 2>&1 || { printf 'hsparse: need Git >= 2.25 for non-cone\n' >&2; exit 2; }
-#       local -a PATHS=(); _hs_load_paths_array PATHS "$paths_csv"
-#       [ ${#PATHS[@]} -gt 0 ] || { printf 'hsparse: no valid paths after normalization\n' >&2; exit 2; }
-#       git sparse-checkout add -- "${PATHS[@]}" || exit 1
-#       if [ $verify -eq 1 ]; then
-#         local ref missing=""; ref="$([ -n "$commit" ] && printf '%s' "$commit" || printf '%s' HEAD)"
-#         local p; for p in "${PATHS[@]}"; do git cat-file -e "$ref:$p" 2>/dev/null || missing="${missing}${missing:+, }$p"; done
-#         [ -z "$missing" ] || { printf 'hsparse: missing at %s: %s\n' "$ref" "$missing" >&2; exit 2; }
-#         if [ -n "$commit" ] && [ -n "$branch" ]; then
-#           git rev-parse --verify "origin/$branch" >/dev/null 2>&1 || git fetch "${qflagv[@]}" --depth 1 origin "$branch" || exit 1
-#           git merge-base --is-ancestor "$commit" "origin/$branch" || { printf 'hsparse: commit %s not reachable from %s\n' "${commit:0:12}" "$branch" >&2; exit 2; }
-#         fi
-#       fi
-#       if [ -n "$commit" ]; then
-#         if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-#           [ -n "$branch" ] || { printf 'hsparse: remote refused SHA fetch; provide --branch containing the commit\n' >&2; exit 2; }
-#           git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$branch" || exit 1
-#           local deepen=50 max=1048576
-#           while ! git cat-file -e "$commit^{commit}" 2>/dev/null; do
-#             [ $deepen -le $max ] || { printf 'hsparse: commit %s not found within deepen cap\n' "${commit:0:12}" >&2; exit 2; }
-#             git fetch "${qflagv[@]}" --filter=blob:none --deepen=$deepen origin "$branch" || exit 1
-#             deepen=$(( deepen * 2 ))
-#           done
-#         fi
-#         git checkout "${qflagv[@]}" --detach "$commit" || exit 1
-#       fi
-#       [ $lfs -eq 1 ] && command -v git-lfs >/dev/null 2>&1 && git lfs pull --include="$(_hs_lfs_include_from_paths "$paths_csv")" --exclude="" || true
-#       case "$export_fmt" in
-#         tar) tar --exclude=.git -czf "${out_name%%.tar.gz}.tar.gz" -C . . || exit 1 ;;
-#         zip) command -v zip >/dev/null 2>&1 || { printf 'hsparse: zip not found\n' >&2; exit 2; }; zip -qr "${out_name%%.zip}.zip" . -x ".git/*" || exit 1 ;;
-#         dir) if command -v rsync >/dev/null 2>&1; then rsync -a --delete --exclude=.git ./ "${out_name}/" || exit 1
-#              else mkdir -p "${out_name}" && tar --exclude=.git -cf - . | (cd "${out_name}" && tar -xf -) || exit 1; fi ;;
-#         "") ;;
-#         *) printf 'hsparse: bad --export\n' >&2; exit 2 ;;
-#       esac
-#       git config --local feature.sparseIndex true >/dev/null 2>&1 || true
-#     ) || return $?
-#     [ $quiet -eq 1 ] || { printf 'Updated sparse checkout in %s\n' "$dest"; git -C "$dest" sparse-checkout list || true; }
-#     return 0
-#   fi
-
-#   # fresh clone
-#   local clone_flags=(--filter=blob:none --sparse --depth 1); [ -n "$branch" ] && clone_flags+=(--branch "$branch")
-#   git clone "${qflagv[@]}" "${clone_flags[@]}" "$url" "$dest" || return $?
-#   (
-#     cd "$dest" || exit 1
-#     git sparse-checkout init --no-cone >/dev/null 2>&1 || { printf 'hsparse: need Git >= 2.25 for non-cone\n' >&2; exit 2; }
-#     local -a PATHS=(); _hs_load_paths_array PATHS "$paths_csv"
-#     [ ${#PATHS[@]} -gt 0 ] || { printf 'hsparse: no valid paths after normalization\n' >&2; exit 2; }
-#     git sparse-checkout set -- "${PATHS[@]}" || exit 1
-#     if [ $verify -eq 1 ]; then
-#       local ref missing=""
-#       if [ -n "$commit" ]; then
-#         git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$commit" 2>/dev/null || true
-#         if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-#           [ -n "$branch" ] || { cd ..; rm -rf "$dest"; printf 'hsparse: remote refused SHA fetch; provide --branch containing the commit (cleaned up)\n' >&2; exit 2; }
-#           git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$branch" || { cd ..; rm -rf "$dest"; exit 1; }
-#         fi
-#         ref="$commit"
-#       elif [ -n "$branch" ]; then
-#         git rev-parse --verify "origin/$branch" >/dev/null 2>&1 || git fetch "${qflagv[@]}" --depth 1 origin "$branch" || { cd ..; rm -rf "$dest"; exit 1; }
-#         ref="origin/$branch"
-#       else ref=HEAD; fi
-#       local p; for p in "${PATHS[@]}"; do git cat-file -e "$ref:$p" 2>/dev/null || missing="${missing}${missing:+, }$p"; done
-#       [ -z "$missing" ] || { cd ..; rm -rf "$dest"; printf 'hsparse: missing at %s: %s (cleaned up)\n' "$ref" "$missing" >&2; exit 2; }
-#       if [ -n "$commit" ] && [ -n "$branch" ]; then
-#         git merge-base --is-ancestor "$commit" "origin/$branch" || { cd ..; rm -rf "$dest"; printf 'hsparse: commit %s not reachable from %s (cleaned up)\n' "${commit:0:12}" "$branch" >&2; exit 2; }
-#       fi
-#     fi
-#     if [ -n "$commit" ]; then
-#       git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$commit" 2>/dev/null || true
-#       if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-#         [ -n "$branch" ] || { printf 'hsparse: remote refused SHA fetch; provide --branch containing the commit\n' >&2; exit 2; }
-#         git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$branch" || exit 1
-#         local deepen=50 max=1048576
-#         while ! git cat-file -e "$commit^{commit}" 2>/dev/null; do
-#           [ $deepen -le $max ] || { printf 'hsparse: commit %s not found within deepen cap\n' "${commit:0:12}" >&2; exit 2; }
-#           git fetch "${qflagv[@]}" --filter=blob:none --deepen=$deepen origin "$branch" || exit 1
-#           deepen=$(( deepen * 2 ))
-#         done
-#       fi
-#       git checkout "${qflagv[@]}" --detach "$commit" || exit 1
-#     elif [ -n "$branch" ]; then
-#       git switch "${qflagv[@]}" "$branch" 2>/dev/null || git switch "${qflagv[@]}" -c "$branch" --track "origin/$branch" 2>/dev/null || git checkout "${qflagv[@]}" "$branch" || git checkout "${qflagv[@]}" -b "$branch" --track "origin/$branch"
-#     fi
-#     [ $lfs -eq 1 ] && command -v git-lfs >/dev/null 2>&1 && git lfs pull --include="$(_hs_lfs_include_from_paths "$paths_csv")" --exclude="" || true
-#     case "$export_fmt" in
-#       tar) tar --exclude=.git -czf "${out_name%%.tar.gz}.tar.gz" -C . . || exit 1 ;;
-#       zip) command -v zip >/dev/null 2>&1 || { printf 'hsparse: zip not found\n' >&2; exit 2; }; zip -qr "${out_name%%.zip}.zip" . -x ".git/*" || exit 1 ;;
-#       dir) if command -v rsync >/dev/null 2>&1; then rsync -a --delete --exclude=.git ./ "${out_name}/" || exit 1
-#            else mkdir -p "${out_name}" && tar --exclude=.git -cf - . | (cd "${out_name}" && tar -xf -) || exit 1; fi ;;
-#       "") ;;
-#       *) printf 'hsparse: bad --export\n' >&2; exit 2 ;;
-#     esac
-#     git config --local feature.sparseIndex true >/dev/null 2>&1 || true
-#   ) || return $?
-
-#   [ $quiet -eq 1 ] || { printf 'Sparse clone ready at %s\n' "$dest"; git -C "$dest" sparse-checkout list || true; }
-# }
-
-hsparse() {
-  [ -n "${BASH_VERSION:-}${ZSH_VERSION:-}" ] || {
-    printf 'hsparse: requires bash or zsh\n' >&2
-    return 2
-  }
+  [ -n "${BASH_VERSION:-}${ZSH_VERSION:-}" ] || { printf 'hsparse: requires bash or zsh
+' >&2; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
     emulate -L zsh
     setopt localoptions no_nomatch
   fi
 
   local repo="" branch="" commit="" dest="" paths_csv=""
-  local url="" owner_repo="" reponame="" gitv="" rc=0 created_dest=0
+  local url="" repo_id="" reponame="" gitv="" rc=0 created_dest=0
   local use_ssh=0 add_mode=0 quiet=0 verify=0 lfs=0
   local export_fmt="" out_name="" script_file="" paths_file="" paths_from=""
-  local pf="" pg="" origin_url="" origin_repo=""
+  local provider="auto" host="" origin_url="" origin_id="" default_host=""
+  local pf="" pg=""
   local -a qflagv=() PATHS=() clone_flags=()
 
   _hs_err() { printf 'hsparse: %s\n' "$*" >&2; }
 
   _hs_usage() {
     cat <<'EOS'
-hsparse: sparse clone/extract for GitHub (bash/zsh)
+hsparse: sparse clone/extract for GitHub/GitLab (bash/zsh)
 Usage: hsparse -r OWNER/REPO|URL -p PATH[,PATH2...] [opts]
-  -r, --repo REPO           GitHub repo as OWNER/REPO or URL
-  -p, --paths CSV           Comma-separated paths (repeatable)
-      --paths-file FILE     Read paths from file (one per line, # comments ok)
-      --paths-from FILE|-   Read paths from file or stdin
-  -b, --branch BR           Branch to clone/switch/fetch
-  -c, --commit SHA          Commit to checkout (detached)
-  -d, --dest DIR            Destination directory (default: repo name)
-  -S, --ssh                 Use SSH when --repo is OWNER/REPO or https URL
-  -A, --add, --update       Add paths to an existing sparse checkout at --dest
-  -q, --quiet               Reduce status output
-      --verify              Verify requested paths exist at target ref
-      --lfs                 Pull matching Git LFS objects for requested paths
-      --export tar|zip|dir  Export checkout contents without .git
-  -o, --out NAME            Export output name/path (default: dest)
-      --script FILE         Write a standalone reproducible bash script
-  -h, --help                Show this help
+  -r, --repo REPO             Repo as OWNER/REPO (or GROUP/SUBGROUP/REPO) or URL
+  -p, --paths CSV             Comma-separated paths (repeatable)
+      --paths-file FILE       Read paths from file (one per line, # comments ok)
+      --paths-from FILE|-     Read paths from file or stdin
+  -b, --branch BR             Branch to clone/switch/fetch
+  -c, --commit SHA            Commit to checkout (detached)
+  -d, --dest DIR              Destination directory (default: repo name)
+  -S, --ssh                   Use SSH when --repo is path-only or HTTP(S)
+  -A, --add, --update         Add paths to an existing sparse checkout at --dest
+  -q, --quiet                 Reduce status output
+      --verify                Verify requested paths exist at target ref
+      --lfs                   Pull matching Git LFS objects for requested paths
+      --export tar|zip|dir    Export checkout contents without .git
+  -o, --out NAME              Export output name/path (default: dest)
+      --script FILE           Write a standalone reproducible bash script
+      --provider auto|github|gitlab
+                              Provider for path-only --repo values (default: auto)
+      --host HOST             Override host (e.g., github.com, gitlab.com, git.example.com)
+  -h, --help                  Show this help
 
 Notes:
   * Git >= 2.25 is required.
-  * This helper is GitHub-specific by design.
+  * Path-only --repo uses --provider/--host (or gitlab.com when provider=gitlab, else github.com).
 EOS
   }
 
-  _hs_need_arg() {
-    [ $# -ge 2 ] && [ -n "${2-}" ] || {
-      _hs_err "option $1 requires an argument"
-      return 2
-    }
-  }
+  _hs_need_arg() { [ $# -ge 2 ] && [ -n "${2-}" ] || { _hs_err "option $1 requires an argument"; return 2; }; }
+  _hs_lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
   _hs_trim() {
     local s=$1
@@ -1953,125 +1643,109 @@ EOS
     printf '%s' "$s"
   }
 
-  _hs_append_paths_csv() {
-    [ -n "$1" ] || return 0
-    paths_csv=${paths_csv:+$paths_csv,}$1
-  }
+  _hs_append_paths_csv() { [ -n "$1" ] && paths_csv=${paths_csv:+$paths_csv,}$1; }
 
   _hs_read_paths_source() {
     local src=$1 label=$2
     if [ "$src" = "-" ]; then
-      sed -e 's/#.*$//' \
-          -e 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-          -e '/^$/d' \
-        | tr -d '\r' \
-        | paste -sd, -
+      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' | tr -d '' | paste -sd, -
     else
-      [ -f "$src" ] || {
-        _hs_err "$label not found: $src"
-        return 2
-      }
-      sed -e 's/#.*$//' \
-          -e 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-          -e '/^$/d' \
-          "$src" \
-        | tr -d '\r' \
-        | paste -sd, -
+      [ -f "$src" ] || { _hs_err "$label not found: $src"; return 2; }
+      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' "$src" | tr -d '' | paste -sd, -
     fi
   }
 
   _hs_git_ver_ge() {
     local v1 v2 a1 b1 c1 d1 a2 b2 c2 d2
-    v1=${1%%[^0-9.]*}
-    v2=${2%%[^0-9.]*}
-    IFS=. read -r a1 b1 c1 d1 <<<"$v1"
-    IFS=. read -r a2 b2 c2 d2 <<<"$v2"
+    v1=${1%%[^0-9.]*}; v2=${2%%[^0-9.]*}
+    IFS=. read -r a1 b1 c1 d1 <<<"$v1"; IFS=. read -r a2 b2 c2 d2 <<<"$v2"
     a1=${a1:-0}; b1=${b1:-0}; c1=${c1:-0}; d1=${d1:-0}
     a2=${a2:-0}; b2=${b2:-0}; c2=${c2:-0}; d2=${d2:-0}
-    if [ "$a1" -gt "$a2" ]; then return 0; elif [ "$a1" -lt "$a2" ]; then return 1; fi
-    if [ "$b1" -gt "$b2" ]; then return 0; elif [ "$b1" -lt "$b2" ]; then return 1; fi
-    if [ "$c1" -gt "$c2" ]; then return 0; elif [ "$c1" -lt "$c2" ]; then return 1; fi
+    [ "$a1" -gt "$a2" ] && return 0; [ "$a1" -lt "$a2" ] && return 1
+    [ "$b1" -gt "$b2" ] && return 0; [ "$b1" -lt "$b2" ] && return 1
+    [ "$c1" -gt "$c2" ] && return 0; [ "$c1" -lt "$c2" ] && return 1
     [ "$d1" -ge "$d2" ]
   }
 
   _hs_repo_id_from_url() {
     local s=$1
     case "$s" in
-      https://github.com/*|http://github.com/*)
-        s=${s#*github.com/}
-        ;;
-      git@github.com:*)
-        s=${s#git@github.com:}
-        ;;
-      ssh://git@github.com/*)
-        s=${s#ssh://git@github.com/}
-        ;;
-      *)
-        return 1
-        ;;
+      https://*/*|http://*/*) s=${s#*://}; s=${s#*/} ;;
+      git@*:* ) s=${s#*:} ;;
+      ssh://git@*/*) s=${s#ssh://git@}; s=${s#*/} ;;
+      *) return 1 ;;
     esac
-    s=${s%.git}
-    s=${s%/}
+    s=${s%.git}; s=${s%/}
     [ -n "$s" ] || return 1
     printf '%s\n' "$s"
   }
 
+  _hs_host_from_url() {
+    local s=$1
+    case "$s" in
+      https://*/*|http://*/*) s=${s#*://}; printf '%s\n' "${s%%/*}" ;;
+      git@*:* ) s=${s#git@}; printf '%s\n' "${s%%:*}" ;;
+      ssh://git@*/*) s=${s#ssh://git@}; printf '%s\n' "${s%%/*}" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  _hs_provider_from_host() {
+    case "$(_hs_lc "$1")" in
+      github.com|*.github.com) printf 'github\n' ;;
+      gitlab.com|*.gitlab.com) printf 'gitlab\n' ;;
+      *) printf 'generic\n' ;;
+    esac
+  }
+
   _hs_resolve_repo() {
-    local input=$1
-    url=$input
+    local input=$1 host_lc=""
+    case "$provider" in auto|github|gitlab) ;; *) _hs_err "--provider must be auto|github|gitlab"; return 2 ;; esac
+
+    if [ -n "$host" ]; then
+      default_host=$host
+    elif [ "$provider" = "gitlab" ]; then
+      default_host=gitlab.com
+    else
+      default_host=github.com
+    fi
+
     case "$input" in
-      https://github.com/*|http://github.com/*)
-        owner_repo=$(_hs_repo_id_from_url "$input") || {
-          _hs_err "invalid GitHub URL: $input"
-          return 2
-        }
-        if [ $use_ssh -eq 1 ]; then
-          url="git@github.com:${owner_repo}.git"
-        else
-          case "$input" in
-            *.git) url="$input" ;;
-            *)     url="${input%/}.git" ;;
-          esac
-        fi
-        ;;
-      git@github.com:*|ssh://git@github.com/*)
-        owner_repo=$(_hs_repo_id_from_url "$input") || {
-          _hs_err "invalid GitHub SSH URL: $input"
-          return 2
-        }
+      https://*/*|http://*/*|git@*:*|ssh://git@*/*)
+        repo_id=$(_hs_repo_id_from_url "$input") || { _hs_err "invalid repository URL: $input"; return 2; }
+        host=$(_hs_host_from_url "$input") || { _hs_err "failed to parse host from URL: $input"; return 2; }
         url=$input
         ;;
       */*)
-        owner_repo=${input%.git}
-        owner_repo=${owner_repo%/}
+        repo_id=${input%.git}; repo_id=${repo_id%/}
+        host=$default_host
         if [ $use_ssh -eq 1 ]; then
-          url="git@github.com:${owner_repo}.git"
+          url="git@${host}:${repo_id}.git"
         else
-          url="https://github.com/${owner_repo}.git"
+          url="https://${host}/${repo_id}.git"
         fi
         ;;
-      *)
-        _hs_err "--repo must be OWNER/REPO or a GitHub URL"
-        return 2
-        ;;
+      *) _hs_err "--repo must be OWNER/REPO, GROUP/SUBGROUP/REPO, or git URL"; return 2 ;;
     esac
-    reponame=${owner_repo##*/}
-    [ -n "$reponame" ] || {
-      _hs_err "failed to derive repository name from --repo"
-      return 2
-    }
+
+    host_lc=$(_hs_lc "$host")
+    if [ "$provider" != "auto" ]; then
+      case "$provider" in
+        github) case "$host_lc" in *gitlab*) _hs_err "provider=github conflicts with host $host"; return 2;; esac ;;
+        gitlab) case "$host_lc" in *github*) _hs_err "provider=gitlab conflicts with host $host"; return 2;; esac ;;
+      esac
+    else
+      provider=$(_hs_provider_from_host "$host")
+    fi
+
+    reponame=${repo_id##*/}
+    [ -n "$reponame" ] || { _hs_err "failed to derive repository name from --repo"; return 2; }
   }
 
   _hs_validate_dest() {
-    case "$dest" in
-      ""|"/"|"."|"..")
-        _hs_err "unsafe --dest: $dest"
-        return 2
-        ;;
-    esac
+    case "$dest" in ""|"/"|"."|"..") _hs_err "unsafe --dest: $dest"; return 2;; esac
     if [ -e "$dest" ] && [ ! -d "$dest/.git" ]; then
-      _hs_err "destination already exists and is not a git repository: $dest"
-      return 2
+      _hs_err "destination exists and is not a git repo: $dest"; return 2
     fi
   }
 
@@ -2079,13 +1753,9 @@ EOS
     local rest token norm
     rest=$paths_csv
     while :; do
-      case "$rest" in
-        *,*) token=${rest%%,*}; rest=${rest#*,} ;;
-        *)   token=$rest; rest="" ;;
-      esac
-      norm=$(_hs_trim "$token")
-      norm=${norm#./}
-      [ -n "$norm" ] && printf '%s\n' "$norm"
+      case "$rest" in *,*) token=${rest%%,*}; rest=${rest#*,} ;; *) token=$rest; rest="" ;; esac
+      norm=$(_hs_trim "$token"); norm=${norm#./}
+      case "$norm" in ""|"."|".."|../*|*/../*|*/..|/*) ;; *) printf '%s\n' "$norm" ;; esac
       [ -n "$rest" ] || break
     done
   }
@@ -2093,124 +1763,63 @@ EOS
   _hs_load_paths() {
     local p
     PATHS=()
-    while IFS= read -r p; do
-      [ -n "$p" ] && PATHS+=("$p")
-    done < <(_hs_emit_paths)
-    [ ${#PATHS[@]} -gt 0 ] || {
-      _hs_err "no valid paths after normalization"
-      return 2
-    }
+    while IFS= read -r p; do [ -n "$p" ] && PATHS+=("$p"); done < <(_hs_emit_paths | awk '!seen[$0]++')
+    [ ${#PATHS[@]} -gt 0 ] || { _hs_err "no valid safe paths after normalization"; return 2; }
   }
 
   _hs_assert_matching_origin() {
     origin_url=$(git remote get-url origin 2>/dev/null || true)
-    [ -n "$origin_url" ] || {
-      _hs_err "existing destination repository has no origin remote"
-      return 2
-    }
-    origin_repo=$(_hs_repo_id_from_url "$origin_url") || {
-      _hs_err "existing destination origin is not a supported GitHub remote: $origin_url"
-      return 2
-    }
-    [ "$origin_repo" = "$owner_repo" ] || {
-      _hs_err "destination repo mismatch: origin is $origin_repo, expected $owner_repo"
-      return 2
-    }
+    [ -n "$origin_url" ] || { _hs_err "existing destination repository has no origin remote"; return 2; }
+    origin_id=$(_hs_repo_id_from_url "$origin_url") || { _hs_err "existing origin is unsupported: $origin_url"; return 2; }
+    [ "$origin_id" = "$repo_id" ] || { _hs_err "destination repo mismatch: origin is $origin_id, expected $repo_id"; return 2; }
   }
 
-  _hs_fetch_branch() {
-    [ -n "$branch" ] || return 0
-    git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$branch" || return 1
-  }
+  _hs_fetch_branch() { [ -n "$branch" ] || return 0; git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$branch"; }
 
   _hs_switch_branch() {
     [ -n "$branch" ] || return 0
     _hs_fetch_branch || return $?
-    git switch "${qflagv[@]}" "$branch" 2>/dev/null \
-      || git switch "${qflagv[@]}" -c "$branch" --track "origin/$branch" 2>/dev/null \
-      || git checkout "${qflagv[@]}" "$branch" 2>/dev/null \
-      || git checkout "${qflagv[@]}" -b "$branch" --track "origin/$branch" \
-      || return 1
+    git switch "${qflagv[@]}" "$branch" 2>/dev/null || git switch "${qflagv[@]}" -c "$branch" --track "origin/$branch" 2>/dev/null || git checkout "${qflagv[@]}" "$branch" 2>/dev/null || git checkout "${qflagv[@]}" -b "$branch" --track "origin/$branch"
   }
 
   _hs_ensure_commit_available() {
     local deepen=50 max=1048576
     [ -n "$commit" ] || return 0
-
     git fetch "${qflagv[@]}" --filter=blob:none --depth 1 origin "$commit" 2>/dev/null || true
-    if git cat-file -e "$commit^{commit}" 2>/dev/null; then
-      return 0
-    fi
-
-    [ -n "$branch" ] || {
-      _hs_err "remote refused SHA fetch; provide --branch containing the commit"
-      return 2
-    }
-
+    git cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+    [ -n "$branch" ] || { _hs_err "remote refused SHA fetch; provide --branch containing --commit"; return 2; }
     _hs_fetch_branch || return $?
     while ! git cat-file -e "$commit^{commit}" 2>/dev/null; do
-      [ $deepen -le $max ] || {
-        _hs_err "commit ${commit:0:12} not found within deepen cap"
-        return 2
-      }
+      [ $deepen -le $max ] || { _hs_err "commit ${commit:0:12} not found within deepen cap"; return 2; }
       git fetch "${qflagv[@]}" --filter=blob:none --deepen=$deepen origin "$branch" || return 1
       deepen=$((deepen * 2))
     done
   }
 
   _hs_checkout_target() {
-    if [ -n "$commit" ]; then
-      _hs_ensure_commit_available || return $?
-      git checkout "${qflagv[@]}" --detach "$commit" || return 1
-    elif [ -n "$branch" ]; then
-      _hs_switch_branch || return $?
+    if [ -n "$commit" ]; then _hs_ensure_commit_available || return $?; git checkout "${qflagv[@]}" --detach "$commit" || return 1
+    elif [ -n "$branch" ]; then _hs_switch_branch || return $?
     fi
   }
 
   _hs_verify_requested() {
     local ref p probe missing=""
     [ $verify -eq 1 ] || return 0
-
-    ref=HEAD
-    [ -n "$commit" ] && ref=$commit
-
-    for p in "${PATHS[@]}"; do
-      probe=${p%/}
-      [ -n "$probe" ] || probe=$p
-      git cat-file -e "$ref:$probe" 2>/dev/null || missing=${missing}${missing:+, }$p
-    done
-    [ -z "$missing" ] || {
-      _hs_err "missing at $ref: $missing"
-      return 2
-    }
-
+    ref=HEAD; [ -n "$commit" ] && ref=$commit
+    for p in "${PATHS[@]}"; do probe=${p%/}; [ -n "$probe" ] || probe=$p; git cat-file -e "$ref:$probe" 2>/dev/null || missing=${missing}${missing:+, }$p; done
+    [ -z "$missing" ] || { _hs_err "missing at $ref: $missing"; return 2; }
     if [ -n "$commit" ] && [ -n "$branch" ]; then
-      git rev-parse --verify "origin/$branch" >/dev/null 2>&1 \
-        || _hs_fetch_branch \
-        || return 1
-      git merge-base --is-ancestor "$commit" "origin/$branch" || {
-        _hs_err "commit ${commit:0:12} not reachable from $branch"
-        return 2
-      }
+      git rev-parse --verify "origin/$branch" >/dev/null 2>&1 || _hs_fetch_branch || return 1
+      git merge-base --is-ancestor "$commit" "origin/$branch" || { _hs_err "commit ${commit:0:12} not reachable from $branch"; return 2; }
     fi
   }
 
   _hs_lfs_include_patterns() {
-    local p probe type
-    local -a inc=()
+    local p probe type; local -a inc=()
     for p in "${PATHS[@]}"; do
-      probe=${p%/}
-      [ -n "$probe" ] || probe=$p
+      probe=${p%/}; [ -n "$probe" ] || probe=$p
       type=$(git cat-file -t "HEAD:$probe" 2>/dev/null || true)
-      case "$type" in
-        tree) inc+=("${probe%/}/**") ;;
-        *)
-          case "$p" in
-            */) inc+=("${probe%/}/**") ;;
-            *)  inc+=("$p") ;;
-          esac
-          ;;
-      esac
+      case "$type" in tree) inc+=("${probe%/}/**") ;; *) case "$p" in */) inc+=("${probe%/}/**") ;; *) inc+=("$p") ;; esac ;; esac
     done
     ( IFS=,; printf '%s' "${inc[*]}" )
   }
@@ -2218,167 +1827,93 @@ EOS
   _hs_export_tree() {
     case "$export_fmt" in
       "") return 0 ;;
-      tar)
-        tar --exclude=.git -czf "${out_name%%.tar.gz}.tar.gz" -C . . || return 1
-        ;;
-      zip)
-        command -v zip >/dev/null 2>&1 || {
-          _hs_err "zip not found"
-          return 127
-        }
-        zip -qr "${out_name%%.zip}.zip" . -x ".git/*" || return 1
-        ;;
+      tar) tar --exclude=.git -czf "${out_name%%.tar.gz}.tar.gz" -C . . || return 1 ;;
+      zip) command -v zip >/dev/null 2>&1 || { _hs_err "zip not found"; return 127; }; zip -qr "${out_name%%.zip}.zip" . -x ".git/*" || return 1 ;;
       dir)
-        if command -v rsync >/dev/null 2>&1; then
-          rsync -a --delete --exclude=.git ./ "${out_name}/" || return 1
-        else
-          mkdir -p -- "$out_name" || return 1
-          tar --exclude=.git -cf - . | (cd "$out_name" && tar -xf -) || return 1
-        fi
+        if command -v rsync >/dev/null 2>&1; then rsync -a --delete --exclude=.git ./ "${out_name}/" || return 1
+        else mkdir -p -- "$out_name" || return 1; tar --exclude=.git -cf - . | (cd "$out_name" && tar -xf -) || return 1; fi
         ;;
-      *)
-        _hs_err "bad --export"
-        return 2
-        ;;
+      *) _hs_err "--export must be tar|zip|dir"; return 2 ;;
     esac
   }
 
   _hs_run_repo() {
     local op=$1 inc=""
-
-    git sparse-checkout init --no-cone >/dev/null 2>&1 || {
-      _hs_err "need Git >= 2.25 for non-cone sparse checkout"
-      return 2
-    }
-
+    git sparse-checkout init --no-cone >/dev/null 2>&1 || { _hs_err "need Git >= 2.25 for non-cone sparse checkout"; return 2; }
     _hs_checkout_target || return $?
     _hs_load_paths || return $?
     git sparse-checkout "$op" -- "${PATHS[@]}" || return 1
     _hs_verify_requested || return $?
-
-    if [ $lfs -eq 1 ] && command -v git-lfs >/dev/null 2>&1; then
-      inc=$(_hs_lfs_include_patterns)
-      [ -n "$inc" ] && git lfs pull --include="$inc" --exclude="" || true
-    fi
-
+    if [ $lfs -eq 1 ] && command -v git-lfs >/dev/null 2>&1; then inc=$(_hs_lfs_include_patterns); [ -n "$inc" ] && git lfs pull --include="$inc" --exclude="" || true; fi
     _hs_export_tree || return $?
     git config --local feature.sparseIndex true >/dev/null 2>&1 || true
   }
 
-  _hs_shq() {
-    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-  }
+  _hs_shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"; }
 
   _hs_write_script() {
     local self_def
-    self_def=$(typeset -f hsparse 2>/dev/null || declare -f hsparse 2>/dev/null) || {
-      _hs_err "failed to retrieve hsparse definition for --script"
-      return 1
-    }
-
+    self_def=$(typeset -f hsparse 2>/dev/null || declare -f hsparse 2>/dev/null) || { _hs_err "failed to retrieve hsparse definition for --script"; return 1; }
     umask 022
     {
-      printf '#!/usr/bin/env bash\n'
-      printf 'set -euo pipefail\n\n'
-      printf '%s\n\n' "$self_def"
-      printf 'hsparse'
-      printf ' -r %s' "$(_hs_shq "$url")"
-      printf ' -p %s' "$(_hs_shq "$paths_csv")"
-      printf ' -d %s' "$(_hs_shq "$dest")"
-      [ -n "$branch" ]    && printf ' -b %s' "$(_hs_shq "$branch")"
-      [ -n "$commit" ]    && printf ' -c %s' "$(_hs_shq "$commit")"
-      [ $quiet -eq 1 ]    && printf ' -q'
-      [ $verify -eq 1 ]   && printf ' --verify'
-      [ $lfs -eq 1 ]      && printf ' --lfs'
+      printf '#!/usr/bin/env bash\nset -euo pipefail\n\n%s\n\n' "$self_def"
+      printf 'hsparse -r %s -p %s -d %s' "$(_hs_shq "$url")" "$(_hs_shq "$paths_csv")" "$(_hs_shq "$dest")"
+      [ -n "$branch" ] && printf ' -b %s' "$(_hs_shq "$branch")"
+      [ -n "$commit" ] && printf ' -c %s' "$(_hs_shq "$commit")"
+      [ $quiet -eq 1 ] && printf ' -q'
+      [ $verify -eq 1 ] && printf ' --verify'
+      [ $lfs -eq 1 ] && printf ' --lfs'
       [ -n "$export_fmt" ] && printf ' --export %s' "$(_hs_shq "$export_fmt")"
-      [ -n "$out_name" ]   && printf ' -o %s' "$(_hs_shq "$out_name")"
+      [ -n "$out_name" ] && printf ' -o %s' "$(_hs_shq "$out_name")"
+      [ $use_ssh -eq 1 ] && printf ' --ssh'
+      [ "$provider" != "auto" ] && printf ' --provider %s' "$(_hs_shq "$provider")"
+      [ -n "$host" ] && printf ' --host %s' "$(_hs_shq "$host")"
       printf '\n'
-    } >"$script_file" || {
-      _hs_err "failed to write script: $script_file"
-      return 1
-    }
+    } >"$script_file" || { _hs_err "failed to write script: $script_file"; return 1; }
     chmod +x -- "$script_file" || true
   }
 
-  if [ $# -eq 0 ]; then
-    _hs_usage >&2
-    return 2
-  fi
-  if [ "${1-}" = "-h" ] || [ "${1-}" = "--help" ]; then
-    _hs_usage
-    return 0
-  fi
+  [ $# -gt 0 ] || { _hs_usage >&2; return 2; }
+  [ "${1-}" = "-h" ] || [ "${1-}" = "--help" ] && { _hs_usage; return 0; }
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      -r|--repo)         _hs_need_arg "$@" || return $?; repo=$2; shift 2 ;;
-      -p|--paths)        _hs_need_arg "$@" || return $?; _hs_append_paths_csv "$2"; shift 2 ;;
-      --paths-file)      _hs_need_arg "$@" || return $?; paths_file=$2; shift 2 ;;
-      --paths-from)      _hs_need_arg "$@" || return $?; paths_from=$2; shift 2 ;;
-      -b|--branch)       _hs_need_arg "$@" || return $?; branch=$2; shift 2 ;;
-      -c|--commit)       _hs_need_arg "$@" || return $?; commit=$2; shift 2 ;;
-      -d|--dest)         _hs_need_arg "$@" || return $?; dest=$2; shift 2 ;;
-      -S|--ssh)          use_ssh=1; shift ;;
+      -r|--repo) _hs_need_arg "$@" || return $?; repo=$2; shift 2 ;;
+      -p|--paths) _hs_need_arg "$@" || return $?; _hs_append_paths_csv "$2"; shift 2 ;;
+      --paths-file) _hs_need_arg "$@" || return $?; paths_file=$2; shift 2 ;;
+      --paths-from) _hs_need_arg "$@" || return $?; paths_from=$2; shift 2 ;;
+      -b|--branch) _hs_need_arg "$@" || return $?; branch=$2; shift 2 ;;
+      -c|--commit) _hs_need_arg "$@" || return $?; commit=$2; shift 2 ;;
+      -d|--dest) _hs_need_arg "$@" || return $?; dest=$2; shift 2 ;;
+      -S|--ssh) use_ssh=1; shift ;;
       -A|--add|--update) add_mode=1; shift ;;
-      -q|--quiet)        quiet=1; qflagv=(-q); shift ;;
-      --verify)          verify=1; shift ;;
-      --lfs)             lfs=1; shift ;;
-      --export)          _hs_need_arg "$@" || return $?; export_fmt=$2; shift 2 ;;
-      -o|--out)          _hs_need_arg "$@" || return $?; out_name=$2; shift 2 ;;
-      --script)          _hs_need_arg "$@" || return $?; script_file=$2; shift 2 ;;
-      --)                shift; break ;;
-      -h|--help)         _hs_usage; return 0 ;;
-      *)                 _hs_err "unknown option: $1"; return 2 ;;
+      -q|--quiet) quiet=1; qflagv=(-q); shift ;;
+      --verify) verify=1; shift ;;
+      --lfs) lfs=1; shift ;;
+      --export) _hs_need_arg "$@" || return $?; export_fmt=$2; shift 2 ;;
+      -o|--out) _hs_need_arg "$@" || return $?; out_name=$2; shift 2 ;;
+      --script) _hs_need_arg "$@" || return $?; script_file=$2; shift 2 ;;
+      --provider) _hs_need_arg "$@" || return $?; provider=$(_hs_lc "$2"); shift 2 ;;
+      --host) _hs_need_arg "$@" || return $?; host=$2; shift 2 ;;
+      --) shift; break ;;
+      -h|--help) _hs_usage; return 0 ;;
+      *) _hs_err "unknown option: $1"; return 2 ;;
     esac
   done
 
-  [ $# -eq 0 ] || {
-    _hs_err "unexpected positional arguments: $*"
-    return 2
-  }
-
-  command -v git >/dev/null 2>&1 || {
-    _hs_err "git not found"
-    return 127
-  }
+  [ $# -eq 0 ] || { _hs_err "unexpected positional arguments: $*"; return 2; }
+  command -v git >/dev/null 2>&1 || { _hs_err "git not found"; return 127; }
 
   gitv=$(git version | sed -E 's/.* ([0-9]+(\.[0-9]+){1,}).*/\1/')
-  if ! _hs_git_ver_ge "$gitv" "2.25.0"; then
-    _hs_err "need Git >= 2.25.0 (found $gitv)"
-    return 2
-  fi
+  _hs_git_ver_ge "$gitv" "2.25.0" || { _hs_err "need Git >= 2.25.0 (found $gitv)"; return 2; }
 
-  [ -n "$repo" ] || {
-    _hs_err "missing --repo"
-    return 2
-  }
+  [ -n "$repo" ] || { _hs_err "missing --repo"; return 2; }
+  [ -n "$paths_file" ] && { pf=$(_hs_read_paths_source "$paths_file" "--paths-file") || return $?; _hs_append_paths_csv "$pf"; }
+  [ -n "$paths_from" ] && { pg=$(_hs_read_paths_source "$paths_from" "--paths-from") || return $?; _hs_append_paths_csv "$pg"; }
+  [ -n "$paths_csv" ] || { _hs_err "missing --paths (or --paths-file/--paths-from)"; return 2; }
 
-  if [ -n "$paths_file" ]; then
-    pf=$(_hs_read_paths_source "$paths_file" "--paths-file") || return $?
-    _hs_append_paths_csv "$pf"
-  fi
-  if [ -n "$paths_from" ]; then
-    pg=$(_hs_read_paths_source "$paths_from" "--paths-from") || return $?
-    _hs_append_paths_csv "$pg"
-  fi
-
-  [ -n "$paths_csv" ] || {
-    _hs_err "missing --paths (or --paths-file/--paths-from)"
-    return 2
-  }
-
-  paths_csv=${paths_csv//, /,}
-  paths_csv=${paths_csv// ,/,}
-  paths_csv=${paths_csv#,}
-  paths_csv=${paths_csv%,}
-
-  case "$export_fmt" in
-    ""|tar|zip|dir) ;;
-    *)
-      _hs_err "--export must be tar|zip|dir"
-      return 2
-      ;;
-  esac
+  paths_csv=${paths_csv//, /,}; paths_csv=${paths_csv// ,/,}; paths_csv=${paths_csv#,}; paths_csv=${paths_csv%,}
+  case "$export_fmt" in ""|tar|zip|dir) ;; *) _hs_err "--export must be tar|zip|dir"; return 2 ;; esac
 
   _hs_resolve_repo "$repo" || return $?
   [ -n "$dest" ] || dest=$reponame
@@ -2391,45 +1926,21 @@ EOS
   fi
 
   if [ -d "$dest/.git" ]; then
-    [ $add_mode -eq 1 ] || {
-      _hs_err "destination already exists as a git repository; use --add/--update or choose --dest"
-      return 2
-    }
-
-    (
-      cd "$dest" || exit 1
-      _hs_assert_matching_origin || exit $?
-      _hs_run_repo add
-    )
-    rc=$?
-    [ $rc -eq 0 ] || return $rc
-
-    [ $quiet -eq 1 ] || {
-      printf 'Updated sparse checkout in %s\n' "$dest"
-      git -C "$dest" sparse-checkout list || true
-    }
+    [ $add_mode -eq 1 ] || { _hs_err "destination exists as git repo; use --add/--update or --dest"; return 2; }
+    ( cd "$dest" || exit 1; _hs_assert_matching_origin || exit $?; _hs_run_repo add )
+    rc=$?; [ $rc -eq 0 ] || return $rc
+    [ $quiet -eq 1 ] || { printf 'Updated sparse checkout in %s\n' "$dest"; git -C "$dest" sparse-checkout list || true; }
     return 0
   fi
 
   clone_flags=(--filter=blob:none --sparse --depth 1)
   [ -n "$branch" ] && clone_flags+=(--branch "$branch")
-
   git clone "${qflagv[@]}" "${clone_flags[@]}" "$url" "$dest" || return $?
   created_dest=1
 
-  (
-    cd "$dest" || exit 1
-    _hs_assert_matching_origin || exit $?
-    _hs_run_repo set
-  )
+  ( cd "$dest" || exit 1; _hs_assert_matching_origin || exit $?; _hs_run_repo set )
   rc=$?
-  if [ $rc -ne 0 ]; then
-    [ $created_dest -eq 1 ] && rm -rf -- "$dest"
-    return $rc
-  fi
+  if [ $rc -ne 0 ]; then [ $created_dest -eq 1 ] && rm -rf -- "$dest"; return $rc; fi
 
-  [ $quiet -eq 1 ] || {
-    printf 'Sparse clone ready at %s\n' "$dest"
-    git -C "$dest" sparse-checkout list || true
-  }
+  [ $quiet -eq 1 ] || { printf 'Sparse clone ready at %s\n' "$dest"; git -C "$dest" sparse-checkout list || true; }
 }
