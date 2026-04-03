@@ -1634,6 +1634,7 @@ EOS
   }
 
   _hs_need_arg() { [ $# -ge 2 ] && [ -n "${2-}" ] || { _hs_err "option $1 requires an argument"; return 2; }; }
+  _hs_lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
   _hs_trim() {
     local s=$1
@@ -1647,10 +1648,12 @@ EOS
   _hs_read_paths_source() {
     local src=$1 label=$2
     if [ "$src" = "-" ]; then
-      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' | tr -d '' | paste -sd, -
+      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' | tr -d '
+' | paste -sd, -
     else
       [ -f "$src" ] || { _hs_err "$label not found: $src"; return 2; }
-      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' "$src" | tr -d '' | paste -sd, -
+      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' "$src" | tr -d '
+' | paste -sd, -
     fi
   }
 
@@ -1690,7 +1693,7 @@ EOS
   }
 
   _hs_provider_from_host() {
-    case "${1,,}" in
+    case "$(_hs_lc "$1")" in
       github.com|*.github.com) printf 'github\n' ;;
       gitlab.com|*.gitlab.com) printf 'gitlab\n' ;;
       *) printf 'generic\n' ;;
@@ -1727,7 +1730,7 @@ EOS
       *) _hs_err "--repo must be OWNER/REPO, GROUP/SUBGROUP/REPO, or git URL"; return 2 ;;
     esac
 
-    host_lc=${host,,}
+    host_lc=$(_hs_lc "$host")
     if [ "$provider" != "auto" ]; then
       case "$provider" in
         github) case "$host_lc" in *gitlab*) _hs_err "provider=github conflicts with host $host"; return 2;; esac ;;
@@ -1892,7 +1895,7 @@ EOS
       --export) _hs_need_arg "$@" || return $?; export_fmt=$2; shift 2 ;;
       -o|--out) _hs_need_arg "$@" || return $?; out_name=$2; shift 2 ;;
       --script) _hs_need_arg "$@" || return $?; script_file=$2; shift 2 ;;
-      --provider) _hs_need_arg "$@" || return $?; provider=${2,,}; shift 2 ;;
+      --provider) _hs_need_arg "$@" || return $?; provider=$(_hs_lc "$2"); shift 2 ;;
       --host) _hs_need_arg "$@" || return $?; host=$2; shift 2 ;;
       --) shift; break ;;
       -h|--help) _hs_usage; return 0 ;;
