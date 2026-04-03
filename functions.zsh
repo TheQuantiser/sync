@@ -1648,10 +1648,12 @@ EOS
   _hs_read_paths_source() {
     local src=$1 label=$2
     if [ "$src" = "-" ]; then
-      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' | tr -d '' | paste -sd, -
+      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' | tr -d '
+' | paste -sd, -
     else
       [ -f "$src" ] || { _hs_err "$label not found: $src"; return 2; }
-      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' "$src" | tr -d '' | paste -sd, -
+      sed -e 's/#.*$//' -e 's/^[[:space:]]*//;s/[[:space:]]*$//' -e '/^$/d' "$src" | tr -d '
+' | paste -sd, -
     fi
   }
 
