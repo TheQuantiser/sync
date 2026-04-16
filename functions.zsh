@@ -1157,20 +1157,6 @@ ssh_mux_master_exists() {
   command ssh -O check "$@" "$host" >/dev/null 2>&1
 }
 
-wait_for_mux_master() {
-  # master socket can appear slightly after ssh -Nf parent exits; poll briefly
-  local host="$1" tries="${2:-20}" delay="${3:-0.15}"
-  shift 3
-  local i
-  for ((i = 1; i <= tries; i++)); do
-    if ssh_mux_master_exists "$host" "$@"; then
-      return 0
-    fi
-    command sleep "$delay"
-  done
-  return 1
-}
-
 lxplus_ssh_auth_opts() {
   # auth+keepalive policy shared by lxplus login paths
   print -r -- \
@@ -1197,19 +1183,11 @@ lxplus_resolve_control_path() {
 }
 
 lxplus_expect_prime_master() {
-  # non-interactive expect flow: answer 2fa once, leave live master socket
-  local cc="$1" host="$2" control_path="$3"
-  shift 3
+  # interactive expect flow: inject otp, then hand terminal to ssh session
+  local cc="$1" host="$2"
+  shift 2
   local -a ssh_parts
-  ssh_parts=(ssh -f
-    -o ControlMaster=yes
-    -o ControlPath="$control_path"
-    -o ControlPersist=300
-    -o RequestTTY=no
-    "$@"
-    "$KERBEROS_USER@$host"
-    true
-  )
+  ssh_parts=(ssh -tt "$@" "$KERBEROS_USER@$host")
   local ssh_cmd_q
   ssh_cmd_q="$(printf '%q ' "${ssh_parts[@]}")"
 
@@ -1220,7 +1198,7 @@ lxplus_expect_prime_master() {
   local RESET=$'\033[0m'
   local rc
 
-  printf '%b[→]%b Priming lxplus multiplex master on %s\n' "$BLUE" "$RESET" "$host"
+  printf '%b[→]%b Starting direct ssh to %s\n' "$BLUE" "$RESET" "$host"
   printf '%b[2FA]%b Waiting for CERN second-factor prompt\n' "$MAGENTA" "$RESET"
 
   SSH_EXPECT_CCACHE="$cc" \
@@ -1285,17 +1263,18 @@ expect {
     -re {Your 2nd factor \([^)]+\):\s*$} {
         after 250
         send -- "[fresh_otp $zdot]\r"
-        exp_continue
+        interact
+        child_exit $ssh_spawn_id
     }
 
     -re {(?i)permission denied|authentication failed|access denied} {
-        puts stderr "\nlxplus_auto: authentication failed while priming master."
+        puts stderr "\nlxplus_auto: authentication failed."
         tty_sanitize
         child_exit $ssh_spawn_id
     }
 
     timeout {
-        puts stderr "\nlxplus_auto: timed out while priming multiplex master."
+        puts stderr "\nlxplus_auto: timed out before the 2FA prompt."
         tty_sanitize
         child_exit $ssh_spawn_id
     }
@@ -1380,18 +1359,12 @@ lxplus() {
         return 1
       }
       if (( use_mux )); then
-        if ! lxplus_expect_prime_master "$cc" "$host" "$control_path" "${ssh_auth_opts[@]}"; then
-          return 1
-        fi
-        if ! wait_for_mux_master "$host" 30 0.15 "${auto_mux_opts[@]}"; then
-          echo "[⚠] lxplus master was not observed in time; continuing with direct attach attempt."
-        fi
-        KRB5CCNAME="$cc" command ssh -XYACv "${auto_mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
+        lxplus_expect_prime_master "$cc" "$host" "${auto_mux_opts[@]}" "${ssh_auth_opts[@]}"
         return $?
       fi
 
-      echo "[✘] lxplus_auto requires mux mode; run 'lxplus nomux' for manual non-mux login."
-      return 2
+      lxplus_expect_prime_master "$cc" "$host" "${mux_opts[@]}" "${ssh_auth_opts[@]}"
+      return $?
     fi
 
     print_cern_otp_hint
