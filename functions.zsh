@@ -1156,7 +1156,7 @@ lxplus_ssh_auth_opts() {
 lxplus_mux_opts() {
   print -r -- \
     -o ControlMaster=auto \
-    -o ControlPath=~/.ssh/cm-%C \
+    -o ControlPath="$HOME/.ssh/cm-%C" \
     -o ControlPersist=300
 }
 
@@ -1166,7 +1166,7 @@ lxplus_expect_prime_master() {
   local -a ssh_parts
   ssh_parts=(ssh -tt -Nf
     -o ControlMaster=yes
-    -o ControlPath=~/.ssh/cm-%C
+    -o ControlPath="$HOME/.ssh/cm-%C"
     -o ControlPersist=300
     "$@"
     "$KERBEROS_USER@$host"
