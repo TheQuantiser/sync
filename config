@@ -1,127 +1,54 @@
-Host lxplus lxplus.cern.ch lxplus_vscode
+Host lxplus lxplus_vscode lxplus.cern.ch lxplus???.cern.ch
+  User mwadud
+
+  GSSAPIAuthentication yes
+  GSSAPIDelegateCredentials yes
+  PreferredAuthentications gssapi-with-mic,keyboard-interactive
+
+  ControlMaster auto
+  ControlPath ~/.ssh/cm-%C
+  ControlPersist 300
+
+  ServerAliveInterval 120
+  ServerAliveCountMax 5
+  Compression yes
+
+  ForwardX11 no
+  ForwardX11Trusted no
+
+  ProxyCommand /bin/bash -lc "set -euo pipefail; export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_cern.keytab mwadud@CERN.CH >/dev/null; exec nc %h %p"
+
+Host lxplus lxplus_vscode lxplus.cern.ch
   HostName lxplus.cern.ch
+
+Host cmslpc*.fnal.gov cmslpc301 cmslpc_heavyel9 cmslpc_heavyel9_vscode
   User mwadud
 
+  PreferredAuthentications gssapi-with-mic,publickey,keyboard-interactive
   GSSAPIAuthentication yes
   GSSAPIDelegateCredentials yes
-  PreferredAuthentications gssapi-with-mic,keyboard-interactive
+
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
 
   ControlMaster auto
   ControlPath ~/.ssh/cm-%C
-  ControlPersist 300
+  ControlPersist 60
 
-  ServerAliveInterval 120
+  ServerAliveInterval 30
   ServerAliveCountMax 5
   Compression yes
 
   ForwardX11 no
   ForwardX11Trusted no
 
-  ProxyCommand /bin/bash -lc "export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; klist -s || kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_cern.keytab mwadud@CERN.CH; exec nc %h %p"
-
-Host lxplus??? lxplus???.cern.ch
-  User mwadud
-
-  GSSAPIAuthentication yes
-  GSSAPIDelegateCredentials yes
-  PreferredAuthentications gssapi-with-mic,keyboard-interactive
-
-  ControlMaster auto
-  ControlPath ~/.ssh/cm-%C
-  ControlPersist 300
-
-  ServerAliveInterval 120
-  ServerAliveCountMax 5
-  Compression yes
-
-  ForwardX11 no
-  ForwardX11Trusted no
-
-  ProxyCommand /bin/bash -lc "export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; klist -s || kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_cern.keytab mwadud@CERN.CH; exec nc %h %p"
+  ProxyCommand /bin/bash -lc "set -euo pipefail; export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_fnal.keytab mwadud@FNAL.GOV >/dev/null; exec nc %h %p"
 
 Host cmslpc301
   HostName cmslpc301.fnal.gov
-  User mwadud
 
-  PreferredAuthentications gssapi-with-mic,publickey,keyboard-interactive
-
-  GSSAPIAuthentication yes
-  GSSAPIDelegateCredentials yes
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-
-  # Multiplexing (critical for VS Code on lxplus)
-  ControlMaster auto
-  ControlPath ~/.ssh/cm-%C
-  ControlPersist 60
-
-  # Keepalive
-  ServerAliveInterval 30
-  ServerAliveCountMax 5
-  Compression yes
-
-  # No X11 (VS Code uses -T anyway; this avoids surprises)
-  ForwardX11 no
-  ForwardX11Trusted no
-
-  # Your ticket refresh / keytab preflight
-  ProxyCommand /bin/bash -lc "export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; klist -s || kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_fnal.keytab mwadud@FNAL.GOV; exec nc %h %p"
-
-Host cmslpc_heavyel9_vscode
+Host cmslpc_heavyel9 cmslpc_heavyel9_vscode
   HostName cmslpc-el9-heavy01.fnal.gov
-  User mwadud
-
-  PreferredAuthentications gssapi-with-mic,publickey,keyboard-interactive
-  GSSAPIAuthentication yes
-  GSSAPIDelegateCredentials yes
-
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-
-  # keep VS Code isolated from any pre-existing interactive master session
-  ControlMaster no
-  ControlPath ~/.ssh/cm-%C
-  ControlPersist 60
-
-  ServerAliveInterval 30
-  ServerAliveCountMax 5
-  Compression yes
-
-  ForwardX11 no
-  ForwardX11Trusted no
-
-  ProxyCommand /bin/bash -lc "export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; klist -s || kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_fnal.keytab mwadud@FNAL.GOV; exec nc %h %p"
-
-
-Host cmslpc_heavyel9
-  HostName cmslpc-el9-heavy01.fnal.gov
-  User mwadud
-
-  PreferredAuthentications gssapi-with-mic,publickey,keyboard-interactive
-  GSSAPIAuthentication yes
-  GSSAPIDelegateCredentials yes
-
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-
-  ControlMaster auto
-  ControlPath ~/.ssh/cm-%C
-  ControlPersist 60
-
-  ServerAliveInterval 30
-  ServerAliveCountMax 5
-  Compression yes
-
-  ForwardX11 no
-  ForwardX11Trusted no
-
-  ProxyCommand /bin/bash -lc "export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; klist -s || kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_fnal.keytab mwadud@FNAL.GOV; exec nc %h %p"
-  
-Host cmslpc*.fnal.gov
-    GSSAPIAuthentication yes
-    GSSAPIDelegateCredentials yes
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
 
 # CMS user head nodes
 Host cmsusr cmsusr* cmsusr*.cms
