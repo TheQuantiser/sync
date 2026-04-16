@@ -1288,9 +1288,9 @@ EOF
 
   rc=$?
   if (( rc == 0 )); then
-    printf '%b[✔]%b lxplus session ended normally\n' "$GREEN" "$RESET"
+    printf '%b[✔]%b lxplus multiplex master is ready\n' "$GREEN" "$RESET"
   else
-    printf '%b[✘]%b lxplus_auto exited with code %s\n' "$RED" "$RESET" "$rc" >&2
+    printf '%b[✘]%b lxplus_auto master priming failed with code %s\n' "$RED" "$RESET" "$rc" >&2
   fi
 
   return "$rc"
