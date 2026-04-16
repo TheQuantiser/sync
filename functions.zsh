@@ -1209,6 +1209,12 @@ proc fresh_otp {zdot} {
     return $otp
 }
 
+proc tty_sanitize {} {
+    catch {exec sh -c {stty sane < /dev/tty}}
+    # Reset cursor-key mode to "normal" (not application mode)
+    send_user -- "\033[?1l\033>"
+}
+
 spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
 set ssh_spawn_id $spawn_id
 
@@ -1232,18 +1238,22 @@ expect {
     -re {Your 2nd factor \([^)]+\):\s*$} {
         after 250
         send -- "[fresh_otp $zdot]\r"
+        tty_sanitize
         interact -u $tty_spawn_id eof {
             return
         }
+        tty_sanitize
         child_exit $ssh_spawn_id
     }
 
     timeout {
         puts stderr "\nlxplus_auto: timed out before the 2FA prompt."
+        tty_sanitize
         child_exit $ssh_spawn_id
     }
 
     eof {
+        tty_sanitize
         child_exit $ssh_spawn_id
     }
 }
