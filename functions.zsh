@@ -1190,14 +1190,20 @@ lxplus_mux_opts() {
     -o ControlPersist=300
 }
 
+lxplus_resolve_control_path() {
+  # resolve concrete controlpath from current ssh config/token expansion
+  local host="$1"
+  command ssh -G "$KERBEROS_USER@$host" 2>/dev/null | command awk '/^controlpath / {print $2; exit}'
+}
+
 lxplus_expect_prime_master() {
   # non-interactive expect flow: answer 2fa once, leave live master socket
-  local cc="$1" host="$2"
-  shift 2
+  local cc="$1" host="$2" control_path="$3"
+  shift 3
   local -a ssh_parts
   ssh_parts=(ssh -f
     -o ControlMaster=yes
-    -o ControlPath="$HOME/.ssh/cm-%C"
+    -o ControlPath="$control_path"
     -o ControlPersist=300
     -o RequestTTY=no
     "$@"
@@ -1345,8 +1351,18 @@ lxplus() {
 
     local -a ssh_auth_opts
     ssh_auth_opts=($(lxplus_ssh_auth_opts))
+    local control_path
+    control_path="$(lxplus_resolve_control_path "$host")"
+    if [[ -z "$control_path" ]]; then
+      echo "[✘] Could not resolve ssh ControlPath for $host."
+      return 1
+    fi
     local -a auto_mux_opts
-    auto_mux_opts=($(lxplus_mux_opts))
+    auto_mux_opts=(
+      -o ControlMaster=auto
+      -o ControlPath="$control_path"
+      -o ControlPersist=300
+    )
 
     if (( auto_otp && use_mux )) && ssh_mux_master_exists "$host" "${auto_mux_opts[@]}"; then
       printf '\033[1;32m[✔]\033[0m Existing lxplus master detected; reusing it\n'
@@ -1364,7 +1380,7 @@ lxplus() {
         return 1
       }
       if (( use_mux )); then
-        if ! lxplus_expect_prime_master "$cc" "$host" "${ssh_auth_opts[@]}"; then
+        if ! lxplus_expect_prime_master "$cc" "$host" "$control_path" "${ssh_auth_opts[@]}"; then
           return 1
         fi
         if ! wait_for_mux_master "$host" 30 0.15 "${auto_mux_opts[@]}"; then
