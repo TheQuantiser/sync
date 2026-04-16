@@ -724,11 +724,13 @@ typeset -g KERBEROS_ALLOW_PASSWORD_FALLBACK=0
 typeset -g LAST_KRB5CCNAME=""
 
 cc_root() {
+  # kerberos cache collection root used by all ssh/kerberos helpers
   # Always compute from HOME, never from a possibly-empty intermediate var
   printf 'DIR:%s/.krb5cc_shared' "$HOME"
 }
 
 ensure_ccroot() {
+  # ensure collection backing dir exists with private perms
   # Create the real directory that backs the collection (no-op if it exists)
   local dir="$HOME/.krb5cc_shared"
   if [[ ! -d "$dir" ]]; then
@@ -740,6 +742,7 @@ ensure_ccroot() {
 
 # Returns the cache PATH (e.g. "DIR::/home/.../tktXYZ") for a given principal
 ccache_for_principal() {
+  # find cache path that currently owns principal P
   local principal="$1"
   command klist -A 2>/dev/null | command awk -v P="$principal" '
     /^Ticket cache:/ {
@@ -754,6 +757,7 @@ ccache_for_principal() {
 }
 
 ensure_keytab_perms() {
+  # enforce keytab mode 600-ish (no group/other bits)
   local keytab="$1"
   [[ -f "$keytab" ]] || return 0
 
@@ -778,6 +782,7 @@ is_truthy() {
 }
 
 destroy_kerberos_ticket() {
+  # delete principal-specific cache, with conservative safety guards
   local principal="$1" verbose="$2" cache_path
 
   [[ "$verbose" == "--verbose" ]] && echo "=== [INFO] Destroying cache for: $principal ==="
@@ -822,6 +827,7 @@ destroy_kerberos_ticket() {
 }
 
 get_kerberos_ticket() {
+  # get/renew kerberos creds for principal into shared cache collection
   local principal="$1" keytab="$2"
   local allow_password_fallback="${3:-$KERBEROS_ALLOW_PASSWORD_FALLBACK}"
   local fallback_allowed=0
@@ -945,6 +951,7 @@ get_kerberos_ticket() {
 # Build ssh options for mux vs nomux.
 # Usage: ssh_opts_for_mux 0|1  (1 = mux, 0 = nomux)
 ssh_opts_for_mux() {
+  # build ssh flags for mux on/off; mux=0 must never attach existing socket
   local use_mux="${1:-1}"
   local -a opts
 
@@ -972,6 +979,7 @@ ssh_opts_for_mux() {
 #   "lxplus953"   -> lxplus953.cern.ch
 #   "lxplus953.cern.ch" -> lxplus953.cern.ch
 lxplus_host_from_arg() {
+  # normalize user input into canonical lxplus fqdn
   local arg="$1"
   if [[ -z "$arg" ]]; then
     print -r -- "lxplus.cern.ch"
@@ -999,6 +1007,7 @@ lxplus_host_from_arg() {
 }
 
 remote_ssh_login() {
+  # generic kerberos-aware ssh launcher used by site wrappers
   local get_ticket_func="$1"
   local host="$2"
   local fallback_ok="${3:-0}"
@@ -1027,6 +1036,7 @@ remote_ssh_login() {
 
 
 sshfs_mount() {
+  # generic kerberos-aware sshfs mount helper with optional extra ssh opts
   local get_ticket_func="$1"
   local remote="$2"
   local mountpoint="${3:-$HOME/$(basename "$remote")}"
@@ -1087,6 +1097,7 @@ CERN_KEYTAB="$HOME/.keytabs/${KERBEROS_USER}_cern.keytab"
 # Then scp it locally: scp mwadud@lxplus.cern.ch:~/mwadud_cern.keytab ~/
 # Docs: https://linux.web.cern.ch/docs/kerberos-access/
 get_CERN_kerberos_ticket() {
+    # thin realm-specific wrapper
     get_kerberos_ticket "$CERN_PRINCIPAL" "$CERN_KEYTAB"
 }
 
@@ -1096,6 +1107,7 @@ destroy_cern_mwadud() {
 
 # --- CERN TOTP helper ---------------------------------------------------------
 cern_totp_code() {
+  # print current cern otp from secret file (raw base32 or otpauth uri)
   local secret_file="${1:-$HOME/.ssh/cern-totp.secret}"
   local raw secret
 
@@ -1129,6 +1141,7 @@ cern_totp_code() {
 }
 
 print_cern_otp_hint() {
+  # best-effort otp display for manual entry; never fatal
   local otp
   if otp="$(cern_totp_code 2>/dev/null)"; then
     printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
@@ -1138,12 +1151,28 @@ print_cern_otp_hint() {
 }
 
 ssh_mux_master_exists() {
+  # probe whether a live control master exists for host+opts tuple
   local host="$1"
   shift
   command ssh -O check "$@" "$host" >/dev/null 2>&1
 }
 
+wait_for_mux_master() {
+  # master socket can appear slightly after ssh -Nf parent exits; poll briefly
+  local host="$1" tries="${2:-20}" delay="${3:-0.15}"
+  shift 3
+  local i
+  for ((i = 1; i <= tries; i++)); do
+    if ssh_mux_master_exists "$host" "$@"; then
+      return 0
+    fi
+    command sleep "$delay"
+  done
+  return 1
+}
+
 lxplus_ssh_auth_opts() {
+  # auth+keepalive policy shared by lxplus login paths
   print -r -- \
     -o GSSAPIAuthentication=yes \
     -o GSSAPIDelegateCredentials=yes \
@@ -1154,6 +1183,7 @@ lxplus_ssh_auth_opts() {
 }
 
 lxplus_mux_opts() {
+  # canonical mux socket policy for lxplus_auto prime+attach path
   print -r -- \
     -o ControlMaster=auto \
     -o ControlPath="$HOME/.ssh/cm-%C" \
@@ -1161,6 +1191,7 @@ lxplus_mux_opts() {
 }
 
 lxplus_expect_prime_master() {
+  # non-interactive expect flow: answer 2fa once, leave live master socket
   local cc="$1" host="$2"
   shift 2
   local -a ssh_parts
@@ -1279,6 +1310,7 @@ EOF
 }
 
 lxplus() {
+    # primary lxplus entrypoint: manual mode or auto-otp mux priming mode
     local use_mux=1
     local node_arg=""
     local auto_otp=0
@@ -1333,7 +1365,7 @@ lxplus() {
         if ! lxplus_expect_prime_master "$cc" "$host" "${ssh_auth_opts[@]}"; then
           return 1
         fi
-        if ! ssh_mux_master_exists "$host" "${auto_mux_opts[@]}"; then
+        if ! wait_for_mux_master "$host" 30 0.15 "${auto_mux_opts[@]}"; then
           echo "[✘] lxplus master was not established; refusing to prompt for 2FA twice."
           return 1
         fi
@@ -1351,6 +1383,7 @@ lxplus() {
 }
 
 lxfiles() {
+    # mount lxplus filesystem via sshfs; reuse mux when available
     local use_mux=1
     local remote_dir="/"
 
@@ -1372,6 +1405,7 @@ lxfiles() {
 }
 
 lxplus_auto() {
+  # convenience wrapper: same parser/logic as lxplus, auto otp enabled
   LXPLUS_AUTO_OTP=1 lxplus "$@"
 }
 
@@ -1384,6 +1418,7 @@ FNAL_KEYTAB="$HOME/.keytabs/${KERBEROS_USER}_fnal.keytab"
 #   wkt ~/mwadud_fnal.keytab
 # Then test: kinit -k -t ~/mwadud_fnal.keytab mwadud@FNAL.GOV
 get_LPC_kerberos_ticket() {
+    # thin realm-specific wrapper
     get_kerberos_ticket "$FNAL_PRINCIPAL" "$FNAL_KEYTAB"
 }
 
@@ -1392,6 +1427,7 @@ destroy_fnal_mwadud() {
 }
 
 fermi() {
+    # lpc login wrapper selecting node family then using common ssh launcher
     local node
     case $1 in
         el8)
@@ -1421,6 +1457,7 @@ fermi() {
 }
 
 fermifiles() {
+    # lpc sshfs mount wrapper
     local remote_dir="${1:-/}"
     sshfs_mount get_LPC_kerberos_ticket "cmslpc-el9.fnal.gov" "/mnt/fermi" 0 "$remote_dir"
 }
