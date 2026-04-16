@@ -1195,12 +1195,14 @@ lxplus_expect_prime_master() {
   local cc="$1" host="$2"
   shift 2
   local -a ssh_parts
-  ssh_parts=(ssh -Nf
+  ssh_parts=(ssh -f
     -o ControlMaster=yes
     -o ControlPath="$HOME/.ssh/cm-%C"
     -o ControlPersist=300
+    -o RequestTTY=no
     "$@"
     "$KERBEROS_USER@$host"
+    true
   )
   local ssh_cmd_q
   ssh_cmd_q="$(printf '%q ' "${ssh_parts[@]}")"
