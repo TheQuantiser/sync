@@ -1212,7 +1212,7 @@ proc fresh_otp {zdot} {
 proc tty_sanitize {} {
     catch {exec sh -c {stty sane < /dev/tty}}
     # Reset cursor-key mode to "normal" (not application mode)
-    send_user -- "\033[?1l\033>"
+    send_user -- "\033\133?1l\033>"
 }
 
 spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
