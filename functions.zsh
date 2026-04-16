@@ -1153,11 +1153,24 @@ lxplus_ssh_auth_opts() {
     -o ServerAliveCountMax=3
 }
 
+lxplus_mux_opts() {
+  print -r -- \
+    -o ControlMaster=auto \
+    -o ControlPath=~/.ssh/cm-%C \
+    -o ControlPersist=300
+}
+
 lxplus_expect_prime_master() {
   local cc="$1" host="$2"
   shift 2
   local -a ssh_parts
-  ssh_parts=(ssh -tt -Nf "$@" "$KERBEROS_USER@$host")
+  ssh_parts=(ssh -tt -Nf
+    -o ControlMaster=yes
+    -o ControlPath=~/.ssh/cm-%C
+    -o ControlPersist=300
+    "$@"
+    "$KERBEROS_USER@$host"
+  )
   local ssh_cmd_q
   ssh_cmd_q="$(printf '%q ' "${ssh_parts[@]}")"
 
@@ -1298,10 +1311,12 @@ lxplus() {
 
     local -a ssh_auth_opts
     ssh_auth_opts=($(lxplus_ssh_auth_opts))
+    local -a auto_mux_opts
+    auto_mux_opts=($(lxplus_mux_opts))
 
-    if (( auto_otp && use_mux )) && ssh_mux_master_exists "$host" "${mux_opts[@]}"; then
+    if (( auto_otp && use_mux )) && ssh_mux_master_exists "$host" "${auto_mux_opts[@]}"; then
       printf '\033[1;32m[✔]\033[0m Existing lxplus master detected; reusing it\n'
-      KRB5CCNAME="$cc" command ssh -tt "${mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
+      KRB5CCNAME="$cc" command ssh -tt "${auto_mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
       return $?
     fi
 
@@ -1315,10 +1330,14 @@ lxplus() {
         return 1
       }
       if (( use_mux )); then
-        if ! lxplus_expect_prime_master "$cc" "$host" "${mux_opts[@]}" "${ssh_auth_opts[@]}"; then
+        if ! lxplus_expect_prime_master "$cc" "$host" "${ssh_auth_opts[@]}"; then
           return 1
         fi
-        KRB5CCNAME="$cc" command ssh -XYACv "${mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
+        if ! ssh_mux_master_exists "$host" "${auto_mux_opts[@]}"; then
+          echo "[✘] lxplus master was not established; refusing to prompt for 2FA twice."
+          return 1
+        fi
+        KRB5CCNAME="$cc" command ssh -XYACv "${auto_mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
         return $?
       fi
 
