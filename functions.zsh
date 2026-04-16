@@ -7,19 +7,23 @@ agupgrade() {
   emulate -L zsh
   setopt local_options err_return pipe_fail no_unset
 
-  local tarball extractor stage="" icon_tmp=""
+  local tarball extractor stage=""
+  local icon_tmp=""
   local app_dir="/opt/antigravity"
   local wrapper="/usr/local/bin/antigravity"
   local desktop="/usr/local/share/applications/antigravity.desktop"
   local icon="/usr/local/share/pixmaps/antigravity.png"
   local icon_url="https://antigravity.google/assets/image/brand/antigravity-icon__full-color.png"
 
-  local -a entries
+  local -a entries candidates
   local entry normalized top first_top=""
   local strip_components=0
   local shared_top=1
   local need_icon_download=0
   local ok=1
+  local main_exec=""
+  local rel_main_exec=""
+  local exec_line=""
 
   if (( $# != 1 )); then
     print -u2 "usage: agupgrade /path/to/Antigravity.tar.gz"
@@ -34,7 +38,7 @@ agupgrade() {
     return 1
   }
 
-  [[ -x "$app_dir/antigravity" ]] || {
+  [[ -x "$app_dir/antigravity" || -x "$app_dir/bin/antigravity" ]] || {
     print -u2 "agupgrade: no existing install found at $app_dir"
     print -u2 "agupgrade: this function is upgrade-only; do a fresh install first"
     return 1
@@ -64,7 +68,11 @@ agupgrade() {
     return 1
   }
 
-  trap 'rm -rf -- "$stage" "$icon_tmp"' EXIT INT TERM HUP
+  cleanup() {
+    [[ -n "$stage" && -d "$stage" ]] && rm -rf -- "$stage"
+    [[ -n "$icon_tmp" && -e "$icon_tmp" ]] && rm -f -- "$icon_tmp"
+  }
+  trap cleanup EXIT INT TERM HUP
 
   entries=("${(@f)$($extractor -tf "$tarball" 2>/dev/null)}")
   (( ${#entries[@]} > 0 )) || {
@@ -105,11 +113,46 @@ agupgrade() {
     }
   fi
 
-  [[ -x "$stage/antigravity" ]] || {
-    print -u2 "agupgrade: extracted archive does not contain expected executable:"
-    print -u2 "           $stage/antigravity"
+  candidates=(
+    "$stage/antigravity"
+    "$stage/bin/antigravity"
+    "$stage/Antigravity"
+    "$stage/bin/Antigravity"
+  )
+
+  local f
+  for f in "${candidates[@]}"; do
+    if [[ -f "$f" && -x "$f" ]]; then
+      main_exec="$f"
+      break
+    fi
+  done
+
+  if [[ -z "$main_exec" ]]; then
+    local -a found_execs
+    found_execs=("${(@f)$(find "$stage" -maxdepth 4 -type f \( -name 'antigravity' -o -name 'Antigravity' \) -perm -u+x 2>/dev/null)}")
+
+    if (( ${#found_execs[@]} == 1 )); then
+      main_exec="$found_execs[1]"
+    elif (( ${#found_execs[@]} > 1 )); then
+      if [[ -f "$stage/antigravity" && -x "$stage/antigravity" ]]; then
+        main_exec="$stage/antigravity"
+      elif [[ -f "$stage/bin/antigravity" && -x "$stage/bin/antigravity" ]]; then
+        main_exec="$stage/bin/antigravity"
+      else
+        main_exec="$found_execs[1]"
+      fi
+    fi
+  fi
+
+  [[ -n "$main_exec" ]] || {
+    print -u2 "agupgrade: could not locate the Antigravity executable in extracted archive"
+    print -u2 "agupgrade: extracted top-level contents:"
+    find "$stage" -maxdepth 2 -mindepth 1 -printf '  %P\n' 2>/dev/null | head -50 >&2
     return 1
   }
+
+  rel_main_exec="${main_exec#$stage/}"
 
   if [[ ! -f "$icon" ]]; then
     need_icon_download=1
@@ -154,11 +197,13 @@ agupgrade() {
     return 1
   fi
 
+  exec_line="exec \"$app_dir/$rel_main_exec\" \"\$@\""
+
   sudo install -d /usr/local/bin
-  sudo tee "$wrapper" >/dev/null <<'EOF'
+  sudo tee "$wrapper" >/dev/null <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec /opt/antigravity/antigravity "$@"
+$exec_line
 EOF
   sudo chmod 0755 "$wrapper"
   sudo chown root:root "$wrapper"
@@ -194,7 +239,7 @@ EOF
     kbuildsycoca5 >/dev/null 2>&1 || true
   fi
 
-  [[ -x "$app_dir/antigravity" ]] || {
+  [[ -x "$app_dir/$rel_main_exec" ]] || {
     print -u2 "agupgrade: verification failed: main executable missing"
     ok=0
   }
@@ -214,7 +259,7 @@ EOF
     ok=0
   }
 
-  grep -q '^exec /opt/antigravity/antigravity "\$@"$' "$wrapper" || {
+  grep -Fqx "$exec_line" "$wrapper" || {
     print -u2 "agupgrade: verification failed: wrapper content incorrect"
     ok=0
   }
@@ -236,6 +281,7 @@ EOF
 
   if (( ok )); then
     print "Antigravity upgrade complete."
+    print "Installed executable: $app_dir/$rel_main_exec"
     print "Resolved launcher: $(command -v antigravity)"
     antigravity --version 2>/dev/null || true
     sudo rm -rf "${app_dir}.prev"
@@ -1024,6 +1070,39 @@ destroy_cern_mwadud() {
     destroy_kerberos_ticket "$CERN_PRINCIPAL"
 }
 
+# --- CERN TOTP helper ---------------------------------------------------------
+cern_totp_code() {
+  local secret_file="${1:-$HOME/.ssh/cern-totp.secret}"
+  local raw secret
+
+  [[ -r "$secret_file" ]] || {
+    printf '\033[1;31m[✘]\033[0m TOTP secret file not readable: %s\n' "$secret_file" >&2
+    return 1
+  }
+
+  command -v oathtool >/dev/null 2>&1 || {
+    printf '\033[1;31m[✘]\033[0m oathtool not found. Install oath-toolkit.\n' >&2
+    return 1
+  }
+
+  raw="$(tr -d '[:space:]' < "$secret_file")"
+
+  # Accept either:
+  #   - raw Base32 secret
+  #   - full otpauth:// URI
+  if [[ "$raw" == otpauth://* ]]; then
+    secret="$(printf '%s\n' "$raw" | sed -n 's/.*[?&]secret=\([^&]*\).*/\1/p')"
+  else
+    secret="$raw"
+  fi
+
+  [[ -n "$secret" ]] || {
+    printf '\033[1;31m[✘]\033[0m Could not extract TOTP secret from %s\n' "$secret_file" >&2
+    return 1
+  }
+
+  oathtool --totp -b -- "$secret"
+}
 
 lxplus() {
     local use_mux=1
@@ -1039,6 +1118,9 @@ lxplus() {
 
     local -a mux_opts
     mux_opts=($(ssh_opts_for_mux "$use_mux"))
+
+    local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
+    printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
 
     remote_ssh_login get_CERN_kerberos_ticket "$host" 1 "${mux_opts[@]}"
 }
@@ -1057,7 +1139,172 @@ lxfiles() {
     local -a mux_opts
     mux_opts=($(ssh_opts_for_mux "$use_mux"))
 
+    local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
+    printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
+
     sshfs_mount get_CERN_kerberos_ticket "lxplus.cern.ch" "/mnt/lxfiles" 1 "$remote_dir" "${mux_opts[@]}"
+}
+
+lxplus_auto() {
+  local RED=$'\033[1;31m'
+  local GREEN=$'\033[1;32m'
+  local BLUE=$'\033[1;34m'
+  local MAGENTA=$'\033[1;35m'
+  local RESET=$'\033[0m'
+
+  local use_mux=1
+  local node_arg=""
+  local host cc rc
+  local -a mux_opts
+  local ssh_cmd_q
+
+  # Keep argument semantics aligned with lxplus()
+  if [[ "$1" == "nomux" ]]; then
+    use_mux=0
+    shift
+  fi
+
+  node_arg="${1:-}"
+  host="$(lxplus_host_from_arg "$node_arg")" || return 1
+
+  mux_opts=($(ssh_opts_for_mux "$use_mux"))
+
+  # If mux is enabled and a master already exists, just reuse it.
+  # No 2FA handling needed in that case.
+  if (( use_mux )) && command ssh -O check "$host" >/dev/null 2>&1; then
+    printf '%b[✔]%b Existing lxplus master detected; reusing it\n' "$GREEN" "$RESET"
+    command ssh -tt "${mux_opts[@]}" "$host"
+    return $?
+  fi
+
+  # Reuse your existing Kerberos machinery exactly as-is.
+  if ! get_CERN_kerberos_ticket; then
+    printf '%b[✘]%b SSH aborted — Kerberos authentication failed.\n' "$RED" "$RESET" >&2
+    return 1
+  fi
+
+  cc="${LAST_KRB5CCNAME:-$(cc_root)}"
+  [[ -n "$cc" ]] || {
+    printf '%b[✘]%b Internal error: no Kerberos cache selected.\n' "$RED" "$RESET" >&2
+    return 1
+  }
+
+  # Build the exact ssh invocation once, shell-quoted for the child shell used by Expect.
+  # Keep the launch shape that actually worked in your environment: sh -lc "exec ssh ..."
+  ssh_cmd_q="$(printf '%q ' \
+    ssh -tt \
+    "${mux_opts[@]}" \
+    -o GSSAPIAuthentication=yes \
+    -o GSSAPIDelegateCredentials=yes \
+    -o PubkeyAuthentication=no \
+    -o PreferredAuthentications=gssapi-with-mic,keyboard-interactive \
+    "$host"
+  )"
+
+  printf '%b[→]%b Starting direct ssh to %s\n' "$BLUE" "$RESET" "$host"
+  printf '%b[2FA]%b Waiting for CERN second-factor prompt\n' "$MAGENTA" "$RESET"
+
+  SSH_EXPECT_CCACHE="$cc" \
+  SSH_EXPECT_SSH_CMD_Q="$ssh_cmd_q" \
+  SSH_EXPECT_ZDOTDIR="${ZDOTDIR:-$HOME}" \
+  /usr/bin/expect <<'EOF'
+set timeout 30
+log_user 1
+match_max 100000
+
+set ccache    $env(SSH_EXPECT_CCACHE)
+set ssh_cmd_q $env(SSH_EXPECT_SSH_CMD_Q)
+set zdot      $env(SSH_EXPECT_ZDOTDIR)
+
+proc child_exit {sid} {
+    if {[catch {wait -i $sid} result]} {
+        exit 1
+    }
+    set rc [lindex $result 3]
+    if {$rc eq ""} { set rc 0 }
+    exit $rc
+}
+
+proc fresh_otp {zdot} {
+    # Generate as late as possible, and avoid the rollover edge.
+    set remain [expr {30 - ([clock seconds] % 30)}]
+    if {$remain <= 2} {
+        after [expr {($remain + 1) * 1000}]
+    }
+
+    set raw [exec env ZDOTDIR=$zdot zsh -ic {cern_totp_code}]
+    set otp [string trim $raw]
+
+    if {![regexp {^[0-9]{6}$} $otp]} {
+        puts stderr "lxplus_auto: invalid OTP from cern_totp_code: <$otp>"
+        exit 97
+    }
+
+    return $otp
+}
+
+# Important:
+# - keep sh -lc "exec ssh ..." because direct spawn ssh did not work reliably for you
+# - bind KRB5CCNAME explicitly from the already-acquired CERN cache
+spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
+
+set ssh_spawn_id $spawn_id
+
+# Because Expect is reading this script from a here-doc, its stdin is not your terminal.
+# Therefore interact must be attached explicitly to /dev/tty.
+if {![info exists tty_spawn_id]} {
+    puts stderr "\nlxplus_auto: /dev/tty unavailable; cannot attach session to your terminal."
+    child_exit $ssh_spawn_id
+}
+
+expect_before {
+    -re {Enter passphrase for key .*:\s*$} {
+        puts stderr "\nlxplus_auto: ssh asked for a key passphrase; unlock the key first."
+        exit 96
+    }
+    -re {(?i)(^|\n).*password:\s*$} {
+        puts stderr "\nlxplus_auto: ssh asked for a password; refusing to continue."
+        exit 95
+    }
+}
+
+expect {
+    -re {Your 2nd factor \([^)]+\):\s*$} {
+        # This small delay mattered in your setup.
+        after 250
+
+        send -- "[fresh_otp $zdot]\r"
+
+        # Do NOT use a greedy catch-all regex after OTP.
+        # Do NOT exp_continue into a timeout path after OTP.
+        # Hand control directly to the real tty.
+        interact -u $tty_spawn_id eof {
+            return
+        }
+
+        child_exit $ssh_spawn_id
+    }
+
+    timeout {
+        puts stderr "\nlxplus_auto: timed out before the 2FA prompt."
+        child_exit $ssh_spawn_id
+    }
+
+    eof {
+        child_exit $ssh_spawn_id
+    }
+}
+EOF
+
+  rc=$?
+
+  if (( rc == 0 )); then
+    printf '%b[✔]%b lxplus session ended normally\n' "$GREEN" "$RESET"
+  else
+    printf '%b[✘]%b lxplus_auto exited with code %s\n' "$RED" "$RESET" "$rc" >&2
+  fi
+
+  return "$rc"
 }
 
 FNAL_REALM="FNAL.GOV"
@@ -1585,7 +1832,7 @@ cvmfs_restart() {
   fi
 }
 
-# hsparse() {
+hsparse() {
   [ -n "${BASH_VERSION:-}${ZSH_VERSION:-}" ] || { printf 'hsparse: requires bash or zsh
 ' >&2; return 2; }
   if [ -n "${ZSH_VERSION:-}" ]; then
