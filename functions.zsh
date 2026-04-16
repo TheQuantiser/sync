@@ -1263,7 +1263,9 @@ expect {
     -re {Your 2nd factor \([^)]+\):\s*$} {
         after 250
         send -- "[fresh_otp $zdot]\r"
-        interact
+        tty_sanitize
+        interact -reset
+        tty_sanitize
         child_exit $ssh_spawn_id
     }
 
