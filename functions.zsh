@@ -1195,7 +1195,7 @@ lxplus_expect_prime_master() {
   local cc="$1" host="$2"
   shift 2
   local -a ssh_parts
-  ssh_parts=(ssh -tt -Nf
+  ssh_parts=(ssh -Nf
     -o ControlMaster=yes
     -o ControlPath="$HOME/.ssh/cm-%C"
     -o ControlPersist=300
