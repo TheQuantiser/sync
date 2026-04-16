@@ -1366,8 +1366,7 @@ lxplus() {
           return 1
         fi
         if ! wait_for_mux_master "$host" 30 0.15 "${auto_mux_opts[@]}"; then
-          echo "[✘] lxplus master was not established; refusing to prompt for 2FA twice."
-          return 1
+          echo "[⚠] lxplus master was not observed in time; continuing with direct attach attempt."
         fi
         KRB5CCNAME="$cc" command ssh -XYACv "${auto_mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
         return $?
