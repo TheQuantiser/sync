@@ -1153,11 +1153,11 @@ lxplus_ssh_auth_opts() {
     -o ServerAliveCountMax=3
 }
 
-lxplus_expect_login() {
+lxplus_expect_prime_master() {
   local cc="$1" host="$2"
   shift 2
   local -a ssh_parts
-  ssh_parts=(ssh -tt "$@" "$KERBEROS_USER@$host")
+  ssh_parts=(ssh -tt -Nf "$@" "$KERBEROS_USER@$host")
   local ssh_cmd_q
   ssh_cmd_q="$(printf '%q ' "${ssh_parts[@]}")"
 
@@ -1168,7 +1168,7 @@ lxplus_expect_login() {
   local RESET=$'\033[0m'
   local rc
 
-  printf '%b[→]%b Starting direct ssh to %s\n' "$BLUE" "$RESET" "$host"
+  printf '%b[→]%b Priming lxplus multiplex master on %s\n' "$BLUE" "$RESET" "$host"
   printf '%b[2FA]%b Waiting for CERN second-factor prompt\n' "$MAGENTA" "$RESET"
 
   SSH_EXPECT_CCACHE="$cc" \
@@ -1218,11 +1218,6 @@ proc tty_sanitize {} {
 spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
 set ssh_spawn_id $spawn_id
 
-if {![info exists tty_spawn_id]} {
-    puts stderr "\nlxplus_auto: /dev/tty unavailable; cannot attach session to your terminal."
-    child_exit $ssh_spawn_id
-}
-
 expect_before {
     -re {Enter passphrase for key .*:\s*$} {
         puts stderr "\nlxplus_auto: ssh asked for a key passphrase; unlock the key first."
@@ -1238,16 +1233,17 @@ expect {
     -re {Your 2nd factor \([^)]+\):\s*$} {
         after 250
         send -- "[fresh_otp $zdot]\r"
-        tty_sanitize
-        interact -u $tty_spawn_id eof {
-            return
-        }
+        exp_continue
+    }
+
+    -re {(?i)permission denied|authentication failed|access denied} {
+        puts stderr "\nlxplus_auto: authentication failed while priming master."
         tty_sanitize
         child_exit $ssh_spawn_id
     }
 
     timeout {
-        puts stderr "\nlxplus_auto: timed out before the 2FA prompt."
+        puts stderr "\nlxplus_auto: timed out while priming multiplex master."
         tty_sanitize
         child_exit $ssh_spawn_id
     }
@@ -1261,9 +1257,9 @@ EOF
 
   rc=$?
   if (( rc == 0 )); then
-    printf '%b[✔]%b lxplus session ended normally\n' "$GREEN" "$RESET"
+    printf '%b[✔]%b lxplus multiplex master is ready\n' "$GREEN" "$RESET"
   else
-    printf '%b[✘]%b lxplus_auto exited with code %s\n' "$RED" "$RESET" "$rc" >&2
+    printf '%b[✘]%b lxplus_auto master priming failed with code %s\n' "$RED" "$RESET" "$rc" >&2
   fi
 
   return "$rc"
@@ -1318,8 +1314,16 @@ lxplus() {
         echo "[✘] zsh not found; lxplus_auto requires zsh for cern_totp_code."
         return 1
       }
-      lxplus_expect_login "$cc" "$host" "${mux_opts[@]}" "${ssh_auth_opts[@]}"
-      return $?
+      if (( use_mux )); then
+        if ! lxplus_expect_prime_master "$cc" "$host" "${mux_opts[@]}" "${ssh_auth_opts[@]}"; then
+          return 1
+        fi
+        KRB5CCNAME="$cc" command ssh -XYACv "${mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
+        return $?
+      fi
+
+      echo "[✘] lxplus_auto requires mux mode; run 'lxplus nomux' for manual non-mux login."
+      return 2
     fi
 
     print_cern_otp_hint
