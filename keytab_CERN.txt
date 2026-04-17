@@ -1,0 +1,49 @@
+=== CERN Kerberos Keytab Setup (Official Method) ===
+
+Goal: Automate CERN login via Kerberos keytab, avoid password prompts.
+
+--- Step 1: SSH into CERN ---
+ssh USERNAME@lxplus.cern.ch
+
+--- Step 2: Generate your keytab ---
+cern-get-keytab --keytab ~/USERNAME_cern.keytab --user --login USERNAME
+
+→ This saves a valid user keytab in your CERN home dir.
+
+--- Step 3: Copy keytab to your local machine ---
+scp USERNAME@lxplus.cern.ch:~/USERNAME_cern.keytab ~/
+
+--- Step 4: Authenticate locally using the keytab ---
+kdestroy
+kinit -kt ~/USERNAME_cern.keytab USERNAME@CERN.CH
+klist
+
+→ If this works, your Kerberos TGT is active and valid.
+
+--- Step 5: SSH into lxplus with Kerberos (no password) ---
+ssh USERNAME@lxplus.cern.ch
+
+→ If configured correctly, this should not prompt for a password.
+
+--- Step 6: Verify TGT and AFS forwarding ---
+ssh -v USERNAME@lxplus.cern.ch klist -f; tokens; touch ~/.sshtest
+
+→ Should display forwardable TGT and AFS token + write test file.
+
+=== SSH Config (~/.ssh/config) ===
+
+Host lxplus*
+    GSSAPIAuthentication yes
+    GSSAPIDelegateCredentials yes
+    ForwardX11 yes
+    ForwardX11Trusted no
+
+→ DO NOT include GSSAPITrustDNS — it is not universally supported.
+
+=== Troubleshooting ===
+
+• If `kinit` fails: double-check the keytab path, filename, permissions.
+• If SSH prompts for password: ensure `kinit` succeeded and `klist` shows a TGT.
+• If AFS tokens are missing: ensure `GSSAPIDelegateCredentials yes` is present.
+
+Done.

@@ -1,0 +1,24 @@
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::    Generate a Local Kerberos Keytab for FNAL Authentication (Client)   ::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+This method lets you create a local keytab file for mwadud@FNAL.GOV using
+your password. Works ONLY if FNAL’s KDC permits password-based keytab
+generation (some realms disable this for security reasons).
+
+Step 1 - Launch ktutil and create the keytab:
+
+  $ ktutil
+  ktutil: addent -password -p mwadud@FNAL.GOV -k 1 -e aes256-cts-hmac-sha1-96
+  Password for mwadud@FNAL.GOV: [enter your Kerberos password]
+  ktutil: wkt /home/mohammad/mwadud_fnal.keytab
+  ktutil: quit
+
+Step 2 - Test the generated keytab:
+
+  $ kinit -k -t /home/mohammad/mwadud_fnal.keytab mwadud@FNAL.GOV
+
+If successful, this acquires a Kerberos ticket silently using the keytab.
+
+Note - The resulting file ~/mwadud_fnal.keytab acts like a password.
+       Protect it with chmod 600 and DO NOT share or sync it externally.
