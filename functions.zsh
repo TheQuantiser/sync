@@ -1239,14 +1239,6 @@ proc fresh_otp {zdot} {
     return $otp
 }
 
-proc tty_sanitize {tty_sid} {
-    catch {exec sh -c {stty sane < /dev/tty}}
-    # Reset cursor-key mode to "normal" (not application mode)
-    if {$tty_sid ne ""} {
-        catch {send -i $tty_sid -- "\033\133?1l\033>"}
-    }
-}
-
 spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
 set ssh_spawn_id $spawn_id
 set tty_spawn_id ""
@@ -1288,13 +1280,11 @@ expect {
         if {$interact_rc} {
             puts stderr "\nlxplus_auto: terminal handoff failed: $interact_err"
         }
-        tty_sanitize $tty_spawn_id
         child_exit $ssh_spawn_id
     }
 
     -re {(?i)permission denied|authentication failed|access denied} {
         puts stderr "\nlxplus_auto: authentication failed."
-        tty_sanitize $tty_spawn_id
         child_exit $ssh_spawn_id
     }
 
