@@ -497,17 +497,607 @@ EOF
   print -P -- "%F{6}${sep}%f"
 }
 
-mux-clean() {
-  local sock out
-  find "$HOME/.ssh" -type s -print0 2>/dev/null |
-  while IFS= read -r -d '' sock; do
-    if out=$(ssh -S "$sock" -O exit _ 2>&1); then
-      printf 'closed  %s\n' "$sock"
-    else
-      rm -f -- "$sock" && printf 'removed %s\n' "$sock"
-    fi
-  done
+# mux-clean() {
+#   local sock out
+#   find "$HOME/.ssh" -type s -print0 2>/dev/null |
+#   while IFS= read -r -d '' sock; do
+#     if out=$(ssh -S "$sock" -O exit _ 2>&1); then
+#       printf 'closed  %s\n' "$sock"
+#     else
+#       rm -f -- "$sock" && printf 'removed %s\n' "$sock"
+#     fi
+#   done
+# }
+
+_mux_usage() {
+  cat <<'USAGE'
+usage: muxctl <cmd> [options] [socket ...]
+
+cmd:
+  ls|list     list live mux masters
+  info        inspect mux sockets
+  clean       close live masters; prune stale mux sockets
+  close       close live masters only
+  prune       prune stale mux sockets only
+  help        show this help
+
+options:
+  -d DIR      scan DIR                  [default: ~/.ssh]
+  -m SUBSTR   only consider paths matching SUBSTR
+  -x SUBSTR   exclude paths matching SUBSTR; repeatable
+  -t SEC      ssh control timeout       [default: 2]
+  -n          dry run
+  -f          force prune weird mux sockets
+  -i          interactive rm
+  -a          include non-mux sockets in info output
+  -v          verbose; include raw conn/channels hints
+  -q          quiet; suppress trailer line
+  -h          help
+USAGE
 }
+
+_mux_short() {
+  case $1 in
+    "$HOME"/*) printf '~/%s\n' "${1#"$HOME"/}" ;;
+    *)         printf '%s\n' "$1" ;;
+  esac
+}
+
+_mux_trim() {
+  local s=$1
+  s=${s#${s%%[![:space:]]*}}
+  s=${s%${s##*[![:space:]]}}
+  printf '%s' "$s"
+}
+
+_mux_is_excluded() {
+  local p=$1 x
+  shift
+  for x in "$@"; do
+    [ -n "$x" ] || continue
+    case $p in
+      *"$x"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+_mux_sshctl() {
+  local sock=$1 op=$2 timeout_s=${3:-2}
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout_s" ssh \
+      -F /dev/null \
+      -o BatchMode=yes \
+      -o ControlMaster=no \
+      -o ControlPath="$sock" \
+      -o LogLevel=ERROR \
+      -O "$op" mux 2>&1
+  else
+    ssh \
+      -F /dev/null \
+      -o BatchMode=yes \
+      -o ControlMaster=no \
+      -o ControlPath="$sock" \
+      -o LogLevel=ERROR \
+      -O "$op" mux 2>&1
+  fi
+}
+
+_mux_probe() {
+  local sock=$1 timeout_s=${2:-2}
+  local out rc pid
+
+  [ -S "$sock" ] || { printf 'missing\t-\t-\n'; return 1; }
+  [ -O "$sock" ] || { printf 'foreign\t-\t-\n'; return 1; }
+
+  out=$(_mux_sshctl "$sock" check "$timeout_s")
+  rc=$?
+
+  case $out in
+    *'Master running (pid='*')'*)
+      pid=${out#*pid=}
+      pid=${pid%%)*}
+      [ -n "$pid" ] || pid='?'
+      printf 'live\t%s\t-\n' "$pid"
+      return 0
+      ;;
+    *'Connection refused'*|*'No such file or directory'*|*'Broken pipe'*|*'Connection reset by peer'*|*'master hello exchange failed'*|*'read from master failed'*)
+      printf 'stale\t-\t-\n'
+      return 1
+      ;;
+    *'mux_client_hello_exchange:'*|*'parse type: incomplete message'*)
+      printf 'nonmux\t-\tagent/foreign-protocol\n'
+      return 1
+      ;;
+  esac
+
+  [ "$rc" = 124 ] 2>/dev/null && {
+    printf 'hung\t-\ttimeout\n'
+    return 1
+  }
+
+  out=${out%%$'\n'*}
+  out=$(_mux_trim "$out")
+  [ -n "$out" ] || out='unknown'
+  printf 'weird\t-\t%s\n' "$out"
+  return 1
+}
+
+_mux_ps_meta() {
+  local pid=$1
+  command -v ps >/dev/null 2>&1 || return 1
+  ps -o etime= -o lstart= -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//'
+}
+
+_mux_cmdline() {
+  local pid=$1
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null
+}
+
+_mux_cmd_parse() {
+  local pid=$1
+  local arg expect host user port cfg jump
+
+  while IFS= read -r arg; do
+    if [ -n "$expect" ]; then
+      case $expect in
+        user) user=$arg ;;
+        port) port=$arg ;;
+        cfg)  cfg=$arg ;;
+        jump) jump=$arg ;;
+        oarg)
+          case $arg in
+            User=*)      user=${arg#User=} ;;
+            Port=*)      port=${arg#Port=} ;;
+            Hostname=*)  host=${arg#Hostname=} ;;
+            ProxyJump=*) jump=${arg#ProxyJump=} ;;
+          esac
+          ;;
+        host)
+          [ -n "$host" ] || host=$arg
+          ;;
+      esac
+      expect=''
+      continue
+    fi
+
+    case $arg in
+      ssh|*/ssh) ;;
+      --)       expect='host' ;;
+      -l)       expect='user' ;;
+      -p)       expect='port' ;;
+      -F)       expect='cfg' ;;
+      -J)       expect='jump' ;;
+      -o)       expect='oarg' ;;
+      -*)       ;;
+      *)
+        [ -n "$host" ] || host=$arg
+        ;;
+    esac
+  done < <(_mux_cmdline "$pid")
+
+  [ -n "$port" ] || port=22
+  printf 'host\t%s\n' "${host:-}"
+  printf 'user\t%s\n' "${user:-}"
+  printf 'port\t%s\n' "${port:-}"
+  printf 'cfg\t%s\n'  "${cfg:-}"
+  printf 'jump\t%s\n' "${jump:-}"
+}
+
+_mux_lsof_peer() {
+  local pid=$1 out
+  command -v lsof >/dev/null 2>&1 || return 1
+  out=$(lsof -Pan -p "$pid" -iTCP 2>/dev/null | awk 'NR>1 && $9 ~ /->/ {print $9; exit}') || return 1
+  [ -n "$out" ] || return 1
+  case $out in
+    *'->'*) printf '%s\n' "${out#*->}" ;;
+    *)      printf '%s\n' "$out" ;;
+  esac
+}
+
+_mux_ss_peer() {
+  local pid=$1 out
+  command -v ss >/dev/null 2>&1 || return 1
+  out=$(ss -ntp 2>/dev/null | awk -v pid="$pid" '$0 ~ ("pid=" pid ",") {print $5; exit}') || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+_mux_peer() {
+  local pid=$1 out
+  out=$(_mux_lsof_peer "$pid") && { printf '%s\n' "$out"; return 0; }
+  out=$(_mux_ss_peer "$pid")   && { printf '%s\n' "$out"; return 0; }
+  return 1
+}
+
+_mux_channels() {
+  local sock=$1 timeout_s=${2:-2} out
+  out=$(_mux_sshctl "$sock" channels "$timeout_s") || return 1
+  printf '%s\n' "$out"
+}
+
+_mux_channels_count() {
+  local data=$1
+  printf '%s\n' "$data" | awk 'NF{c++} END{print c+0}'
+}
+
+_mux_conninfo() {
+  local sock=$1 timeout_s=${2:-2} out
+  out=$(_mux_sshctl "$sock" conninfo "$timeout_s") || return 1
+  printf '%s\n' "$out"
+}
+
+_mux_first_line() {
+  printf '%s\n' "$1" | awk 'NF{print; exit}'
+}
+
+_mux_config_persist() {
+  local host=$1 user=$2 port=$3 cfg=$4 out
+  local -a args
+
+  [ -n "$host" ] || return 1
+
+  args=(-G)
+  if [ -n "$cfg" ] && [ "$cfg" != none ]; then
+    args+=(-F "$cfg")
+  fi
+  [ -n "$user" ] && args+=(-l "$user")
+  [ -n "$port" ] && args+=(-p "$port")
+  args+=(-- "$host")
+
+  out=$(ssh "${args[@]}" 2>/dev/null) || return 1
+  printf '%s\n' "$out" | awk '$1=="controlpersist"{print $2; exit}'
+}
+
+_mux_desc() {
+  local user=$1 host=$2 port=$3
+  if [ -n "$user" ] && [ -n "$host" ]; then
+    printf '%s@%s:%s\n' "$user" "$host" "${port:-22}"
+  elif [ -n "$host" ]; then
+    printf '%s:%s\n' "$host" "${port:-22}"
+  else
+    printf '?\n'
+  fi
+}
+
+_mux_enrich() {
+  local sock=$1 pid=$2 timeout_s=$3
+  local psline etime lstart args
+  local host user port cfg jump
+  local peer conn channels chcount persist desc
+  local key val
+
+  psline=$(_mux_ps_meta "$pid" 2>/dev/null || true)
+  if [ -n "$psline" ]; then
+    etime=$(printf '%s\n' "$psline" | awk '{print $1}')
+    lstart=$(printf '%s\n' "$psline" | awk '{print $2, $3, $4, $5, $6}')
+    args=$(printf '%s\n' "$psline" | awk '{for (i=7; i<=NF; ++i) printf("%s%s", $i, (i<NF?" ":"")); printf("\n")}')
+  fi
+
+  while IFS=$'\t' read -r key val; do
+    case $key in
+      host) host=$val ;;
+      user) user=$val ;;
+      port) port=$val ;;
+      cfg)  cfg=$val ;;
+      jump) jump=$val ;;
+    esac
+  done < <(_mux_cmd_parse "$pid" 2>/dev/null)
+
+  desc=$(_mux_desc "$user" "$host" "$port")
+  peer=$(_mux_peer "$pid" 2>/dev/null || true)
+  conn=$(_mux_conninfo "$sock" "$timeout_s" 2>/dev/null || true)
+  channels=$(_mux_channels "$sock" "$timeout_s" 2>/dev/null || true)
+  chcount=$(_mux_channels_count "$channels")
+  persist=$(_mux_config_persist "$host" "$user" "$port" "$cfg" 2>/dev/null || true)
+
+  printf 'pid\t%s\n'        "$pid"
+  printf 'age\t%s\n'        "${etime:-?}"
+  printf 'start\t%s\n'      "${lstart:-?}"
+  printf 'desc\t%s\n'       "${desc:-?}"
+  printf 'peer\t%s\n'       "${peer:-?}"
+  printf 'channels\t%s\n'   "${chcount:-?}"
+  printf 'persist\t%s\n'    "${persist:-unknown}"
+  printf 'host\t%s\n'       "${host:-}"
+  printf 'user\t%s\n'       "${user:-}"
+  printf 'port\t%s\n'       "${port:-}"
+  printf 'cfg\t%s\n'        "${cfg:-}"
+  printf 'jump\t%s\n'       "${jump:-}"
+  printf 'argv\t%s\n'       "${args:-}"
+  printf 'connraw\t%s\n'    "$(_mux_first_line "$conn")"
+  printf 'channelsraw\t%s\n' "$(_mux_first_line "$channels")"
+}
+
+_mux_rm() {
+  local sock=$1 dry=$2 interactive=$3
+  if [ "$dry" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$interactive" -eq 1 ]; then
+    rm -i -- "$sock"
+  else
+    rm -f -- "$sock"
+  fi
+}
+
+_mux_scan() {
+  local dir=$1
+  find "$dir" -xdev -type s -user "$(id -un)" -print 2>/dev/null
+}
+
+muxctl() {
+  local cmd=${1:-list}
+  shift || true
+
+  local dir timeout_s dry_run force interactive show_nonmux verbose quiet
+  local match sock short state pid note
+  local age desc peer channels persist start connraw channelsraw
+  local key val
+  local -a excludes inputs
+  local -a live_rows stale_rows hung_rows weird_rows nonmux_rows foreign_rows
+  local -a closed_rows pruned_rows kept_rows
+
+  dir=$HOME/.ssh
+  timeout_s=2
+  dry_run=0
+  force=0
+  interactive=0
+  show_nonmux=0
+  verbose=0
+  quiet=0
+  excludes=( '/.ssh/agent/' )
+  inputs=()
+
+  case $cmd in
+    ls|list|info|clean|close|prune|help) ;;
+    -h|--help) _mux_usage; return 0 ;;
+    *) printf 'muxctl: bad cmd: %s\n' "$cmd" >&2; _mux_usage >&2; return 64 ;;
+  esac
+
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -d) [ $# -ge 2 ] || { printf 'muxctl: -d needs arg\n' >&2; return 64; }; dir=$2; shift 2 ;;
+      -m) [ $# -ge 2 ] || { printf 'muxctl: -m needs arg\n' >&2; return 64; }; match=$2; shift 2 ;;
+      -x) [ $# -ge 2 ] || { printf 'muxctl: -x needs arg\n' >&2; return 64; }; excludes+=("$2"); shift 2 ;;
+      -t) [ $# -ge 2 ] || { printf 'muxctl: -t needs arg\n' >&2; return 64; }; timeout_s=$2; shift 2 ;;
+      -n) dry_run=1; shift ;;
+      -f) force=1; shift ;;
+      -i) interactive=1; shift ;;
+      -a) show_nonmux=1; shift ;;
+      -v) verbose=1; shift ;;
+      -q) quiet=1; shift ;;
+      -h|--help) _mux_usage; return 0 ;;
+      --) shift; while [ $# -gt 0 ]; do inputs+=("$1"); shift; done ;;
+      -*) printf 'muxctl: bad option: %s\n' "$1" >&2; return 64 ;;
+      *)  inputs+=("$1"); shift ;;
+    esac
+  done
+
+  case $timeout_s in
+    ''|*[!0-9]*) printf 'muxctl: -t expects integer seconds\n' >&2; return 64 ;;
+  esac
+
+  if [ ${#inputs[@]} -eq 0 ]; then
+    while IFS= read -r sock; do
+      [ -n "$sock" ] || continue
+      _mux_is_excluded "$sock" "${excludes[@]}" && continue
+      if [ -n "$match" ]; then
+        case $sock in *"$match"*) ;; *) continue ;; esac
+      fi
+      inputs+=("$sock")
+    done < <(_mux_scan "$dir")
+  fi
+
+  for sock in "${inputs[@]}"; do
+    short=$(_mux_short "$sock")
+    IFS=$'\t' read -r state pid note <<EOF
+$(_mux_probe "$sock" "$timeout_s")
+EOF
+
+    case $cmd in
+      ls|list)
+        [ "$state" = live ] || continue
+        age='?'; desc='?'; peer='?'; channels='?'; persist='unknown'
+        while IFS=$'\t' read -r key val; do
+          case $key in
+            age)      age=$val ;;
+            desc)     desc=$val ;;
+            peer)     peer=$val ;;
+            channels) channels=$val ;;
+            persist)  persist=$val ;;
+          esac
+        done < <(_mux_enrich "$sock" "$pid" "$timeout_s")
+
+        live_rows+=("$(printf '%-7s  %-10s  %-30s  %-22s  ch=%-3s  cp=%-8s  %s' \
+          "$pid" "$age" "$desc" "$peer" "$channels" "$persist" "$short")")
+        ;;
+
+      info)
+        case $state in
+          live)
+            age='?'; start='?'; desc='?'; peer='?'; channels='?'; persist='unknown'; connraw=''; channelsraw=''
+            while IFS=$'\t' read -r key val; do
+              case $key in
+                age)         age=$val ;;
+                start)       start=$val ;;
+                desc)        desc=$val ;;
+                peer)        peer=$val ;;
+                channels)    channels=$val ;;
+                persist)     persist=$val ;;
+                connraw)     connraw=$val ;;
+                channelsraw) channelsraw=$val ;;
+              esac
+            done < <(_mux_enrich "$sock" "$pid" "$timeout_s")
+
+            if [ "$verbose" -eq 1 ]; then
+              live_rows+=("sock=$short
+pid=$pid age=$age start=$start
+dst=$desc
+peer=$peer
+mux=channels:$channels persist:${persist:-unknown}
+conn=${connraw:-?}
+chan=${channelsraw:-?}")
+            else
+              live_rows+=("sock=$short
+pid=$pid age=$age start=$start
+dst=$desc
+peer=$peer
+mux=channels:$channels persist:${persist:-unknown}")
+            fi
+            ;;
+          stale)   stale_rows+=("sock=$short
+state=stale") ;;
+          hung)    hung_rows+=("sock=$short
+state=hung
+note=$note") ;;
+          weird)   weird_rows+=("sock=$short
+state=weird
+note=$note") ;;
+          foreign) foreign_rows+=("sock=$short
+state=foreign") ;;
+          nonmux)  [ "$show_nonmux" -eq 1 ] && nonmux_rows+=("sock=$short
+state=nonmux
+note=$note") ;;
+        esac
+        ;;
+
+      close)
+        [ "$state" = live ] || continue
+        if [ "$dry_run" -eq 1 ]; then
+          closed_rows+=("$short")
+        else
+          if _mux_sshctl "$sock" exit "$timeout_s" >/dev/null; then
+            closed_rows+=("$short")
+          else
+            kept_rows+=("$short  exit-failed")
+          fi
+        fi
+        ;;
+
+      prune)
+        case $state in
+          stale|hung)
+            if _mux_rm "$sock" "$dry_run" "$interactive"; then
+              pruned_rows+=("$short")
+            else
+              kept_rows+=("$short  rm-failed")
+            fi
+            ;;
+          weird)
+            if [ "$force" -eq 1 ]; then
+              if _mux_rm "$sock" "$dry_run" "$interactive"; then
+                pruned_rows+=("$short")
+              else
+                kept_rows+=("$short  rm-failed")
+              fi
+            else
+              kept_rows+=("$short  $note")
+            fi
+            ;;
+        esac
+        ;;
+
+      clean)
+        case $state in
+          live)
+            if [ "$dry_run" -eq 1 ]; then
+              closed_rows+=("$short")
+            else
+              if _mux_sshctl "$sock" exit "$timeout_s" >/dev/null; then
+                closed_rows+=("$short")
+              else
+                kept_rows+=("$short  exit-failed")
+              fi
+            fi
+            ;;
+          stale|hung)
+            if _mux_rm "$sock" "$dry_run" "$interactive"; then
+              pruned_rows+=("$short")
+            else
+              kept_rows+=("$short  rm-failed")
+            fi
+            ;;
+          weird)
+            if [ "$force" -eq 1 ]; then
+              if _mux_rm "$sock" "$dry_run" "$interactive"; then
+                pruned_rows+=("$short")
+              else
+                kept_rows+=("$short  rm-failed")
+              fi
+            fi
+            ;;
+        esac
+        ;;
+
+      help)
+        _mux_usage
+        return 0
+        ;;
+    esac
+  done
+
+  case $cmd in
+    ls|list)
+      [ ${#live_rows[@]} -gt 0 ] && {
+        printf 'live %d\n' "${#live_rows[@]}"
+        printf '%s\n' "${live_rows[@]}"
+      }
+      [ "$quiet" -eq 1 ] || printf 'scan %d\n' "${#inputs[@]}"
+      ;;
+
+    info)
+      [ ${#live_rows[@]} -gt 0 ] && {
+        printf 'live %d\n' "${#live_rows[@]}"
+        printf '%s\n\n' "${live_rows[@]}"
+      }
+      [ ${#stale_rows[@]} -gt 0 ] && {
+        printf 'stale %d\n' "${#stale_rows[@]}"
+        printf '%s\n\n' "${stale_rows[@]}"
+      }
+      [ ${#hung_rows[@]} -gt 0 ] && {
+        printf 'hung %d\n' "${#hung_rows[@]}"
+        printf '%s\n\n' "${hung_rows[@]}"
+      }
+      [ ${#weird_rows[@]} -gt 0 ] && {
+        printf 'weird %d\n' "${#weird_rows[@]}"
+        printf '%s\n\n' "${weird_rows[@]}"
+      }
+      [ ${#foreign_rows[@]} -gt 0 ] && {
+        printf 'foreign %d\n' "${#foreign_rows[@]}"
+        printf '%s\n\n' "${foreign_rows[@]}"
+      }
+      [ ${#nonmux_rows[@]} -gt 0 ] && {
+        printf 'nonmux %d\n' "${#nonmux_rows[@]}"
+        printf '%s\n\n' "${nonmux_rows[@]}"
+      }
+      [ "$quiet" -eq 1 ] || printf 'scan %d\n' "${#inputs[@]}"
+      ;;
+
+    close|clean|prune)
+      [ ${#closed_rows[@]} -gt 0 ] && {
+        printf 'closed %d\n' "${#closed_rows[@]}"
+        printf '%s\n' "${closed_rows[@]}"
+      }
+      [ ${#pruned_rows[@]} -gt 0 ] && {
+        printf 'pruned %d\n' "${#pruned_rows[@]}"
+        printf '%s\n' "${pruned_rows[@]}"
+      }
+      [ ${#kept_rows[@]} -gt 0 ] && {
+        printf 'kept %d\n' "${#kept_rows[@]}"
+        printf '%s\n' "${kept_rows[@]}"
+      }
+      [ "$quiet" -eq 1 ] || printf 'done  scan %d  closed %d  pruned %d  kept %d\n' \
+        "${#inputs[@]}" "${#closed_rows[@]}" "${#pruned_rows[@]}" "${#kept_rows[@]}"
+      ;;
+  esac
+}
+
+mux-clean() { muxctl clean "$@"; }
+mux-ls()    { muxctl ls    "$@"; }
+mux-info()  { muxctl info  "$@"; }
+mux-close() { muxctl close "$@"; }
+mux-prune() { muxctl prune "$@"; }
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  PIPE LOGGER (Bash) — log the exact LHS command + its output, tee-style
@@ -716,21 +1306,19 @@ check_gpe6e_interrupt() {
     echo -e "${cyan}────────────────────────────${reset}"
 }
 
+
 # LXPLUS and LPC username
 KERBEROS_USER="mwadud"
 # export KRB5CCNAME="DIR:$HOME/.krb5cc_shared"
-typeset -g KERBEROS_ALLOW_PASSWORD_FALLBACK=0
 
 typeset -g LAST_KRB5CCNAME=""
 
 cc_root() {
-  # kerberos cache collection root used by all ssh/kerberos helpers
   # Always compute from HOME, never from a possibly-empty intermediate var
   printf 'DIR:%s/.krb5cc_shared' "$HOME"
 }
 
 ensure_ccroot() {
-  # ensure collection backing dir exists with private perms
   # Create the real directory that backs the collection (no-op if it exists)
   local dir="$HOME/.krb5cc_shared"
   if [[ ! -d "$dir" ]]; then
@@ -742,7 +1330,6 @@ ensure_ccroot() {
 
 # Returns the cache PATH (e.g. "DIR::/home/.../tktXYZ") for a given principal
 ccache_for_principal() {
-  # find cache path that currently owns principal P
   local principal="$1"
   command klist -A 2>/dev/null | command awk -v P="$principal" '
     /^Ticket cache:/ {
@@ -757,7 +1344,6 @@ ccache_for_principal() {
 }
 
 ensure_keytab_perms() {
-  # enforce keytab mode 600-ish (no group/other bits)
   local keytab="$1"
   [[ -f "$keytab" ]] || return 0
 
@@ -774,15 +1360,7 @@ ensure_keytab_perms() {
   fi
 }
 
-is_truthy() {
-  case "${1:l}" in
-    1|true|yes|on) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 destroy_kerberos_ticket() {
-  # delete principal-specific cache, with conservative safety guards
   local principal="$1" verbose="$2" cache_path
 
   [[ "$verbose" == "--verbose" ]] && echo "=== [INFO] Destroying cache for: $principal ==="
@@ -827,20 +1405,13 @@ destroy_kerberos_ticket() {
 }
 
 get_kerberos_ticket() {
-  # get/renew kerberos creds for principal into shared cache collection
   local principal="$1" keytab="$2"
-  local allow_password_fallback="${3:-$KERBEROS_ALLOW_PASSWORD_FALLBACK}"
-  local fallback_allowed=0
   local realm="${principal##*@}"
   local current_cache="" default_principal="" exp="" ren=""
   local found=0
 
   local RESET="\033[0m" BOLD="\033[1m" GREEN="\033[1;32m" RED="\033[1;31m" \
         YELLOW="\033[1;33m" CYAN="\033[1;36m" BLUE="\033[1;34m"
-
-  if is_truthy "$allow_password_fallback"; then
-    fallback_allowed=1
-  fi
 
   ensure_ccroot || return 1
   local collection; collection="$(cc_root)"
@@ -920,17 +1491,7 @@ get_kerberos_ticket() {
       [[ -n "$LAST_KRB5CCNAME" ]] || LAST_KRB5CCNAME="$collection"
       return 0
     else
-      if (( fallback_allowed )); then
-        echo -e "${RED}[!!]${RESET} Keytab authentication ${BOLD}failed${RESET}. Falling back to ${YELLOW}password prompt${RESET}."
-      else
-        echo -e "${RED}[!!]${RESET} Keytab authentication ${BOLD}failed${RESET}, and password fallback is disabled."
-        return 1
-      fi
-    fi
-  else
-    if (( ! fallback_allowed )); then
-      echo -e "${RED}[!!]${RESET} Keytab not found at ${BOLD}$keytab${RESET}, and password fallback is disabled."
-      return 1
+      echo -e "${RED}[!!]${RESET} Keytab authentication ${BOLD}failed${RESET}. Falling back to ${YELLOW}password prompt${RESET}."
     fi
   fi
 
@@ -951,7 +1512,6 @@ get_kerberos_ticket() {
 # Build ssh options for mux vs nomux.
 # Usage: ssh_opts_for_mux 0|1  (1 = mux, 0 = nomux)
 ssh_opts_for_mux() {
-  # build ssh flags for mux on/off; mux=0 must never attach existing socket
   local use_mux="${1:-1}"
   local -a opts
 
@@ -979,7 +1539,6 @@ ssh_opts_for_mux() {
 #   "lxplus953"   -> lxplus953.cern.ch
 #   "lxplus953.cern.ch" -> lxplus953.cern.ch
 lxplus_host_from_arg() {
-  # normalize user input into canonical lxplus fqdn
   local arg="$1"
   if [[ -z "$arg" ]]; then
     print -r -- "lxplus.cern.ch"
@@ -1007,7 +1566,6 @@ lxplus_host_from_arg() {
 }
 
 remote_ssh_login() {
-  # generic kerberos-aware ssh launcher used by site wrappers
   local get_ticket_func="$1"
   local host="$2"
   local fallback_ok="${3:-0}"
@@ -1036,7 +1594,6 @@ remote_ssh_login() {
 
 
 sshfs_mount() {
-  # generic kerberos-aware sshfs mount helper with optional extra ssh opts
   local get_ticket_func="$1"
   local remote="$2"
   local mountpoint="${3:-$HOME/$(basename "$remote")}"
@@ -1097,7 +1654,6 @@ CERN_KEYTAB="$HOME/.keytabs/${KERBEROS_USER}_cern.keytab"
 # Then scp it locally: scp mwadud@lxplus.cern.ch:~/mwadud_cern.keytab ~/
 # Docs: https://linux.web.cern.ch/docs/kerberos-access/
 get_CERN_kerberos_ticket() {
-    # thin realm-specific wrapper
     get_kerberos_ticket "$CERN_PRINCIPAL" "$CERN_KEYTAB"
 }
 
@@ -1107,7 +1663,6 @@ destroy_cern_mwadud() {
 
 # --- CERN TOTP helper ---------------------------------------------------------
 cern_totp_code() {
-  # print current cern otp from secret file (raw base32 or otpauth uri)
   local secret_file="${1:-$HOME/.ssh/cern-totp.secret}"
   local raw secret
 
@@ -1140,63 +1695,102 @@ cern_totp_code() {
   oathtool --totp -b -- "$secret"
 }
 
-print_cern_otp_hint() {
-  # best-effort otp display for manual entry; never fatal
-  local otp
-  if otp="$(cern_totp_code 2>/dev/null)"; then
+lxplus() {
+    local use_mux=1
+    local node_arg=""
+
+    if [[ "$1" == "nomux" ]]; then
+      use_mux=0
+      shift
+    fi
+
+    node_arg="${1:-}"
+    local host; host="$(lxplus_host_from_arg "$node_arg")"
+
+    local -a mux_opts
+    mux_opts=($(ssh_opts_for_mux "$use_mux"))
+
+    local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
     printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
-  else
-    printf '\033[1;33m[⚠]\033[0m Could not generate CERN OTP automatically; continue with manual 2FA entry if prompted.\n'
-  fi
+
+    remote_ssh_login get_CERN_kerberos_ticket "$host" 1 "${mux_opts[@]}"
 }
 
-ssh_mux_master_exists() {
-  # probe whether a live control master exists for host+opts tuple
-  local host="$1"
-  shift
-  command ssh -O check "$@" "$host" >/dev/null 2>&1
+lxfiles() {
+    local use_mux=1
+    local remote_dir="/"
+
+    if [[ "$1" == "nomux" ]]; then
+      use_mux=0
+      shift
+    fi
+
+    remote_dir="${1:-/}"
+
+    local -a mux_opts
+    mux_opts=($(ssh_opts_for_mux "$use_mux"))
+
+    local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
+    printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
+
+    sshfs_mount get_CERN_kerberos_ticket "lxplus.cern.ch" "/mnt/lxfiles" 1 "$remote_dir" "${mux_opts[@]}"
 }
 
-lxplus_ssh_auth_opts() {
-  # auth+keepalive policy shared by lxplus login paths
-  print -r -- \
-    -o GSSAPIAuthentication=yes \
-    -o GSSAPIDelegateCredentials=yes \
-    -o PubkeyAuthentication=no \
-    -o PreferredAuthentications=gssapi-with-mic,keyboard-interactive \
-    -o ServerAliveInterval=15 \
-    -o ServerAliveCountMax=3
-}
-
-lxplus_mux_opts() {
-  # canonical mux socket policy for lxplus_auto prime+attach path
-  print -r -- \
-    -o ControlMaster=auto \
-    -o ControlPath="$HOME/.ssh/cm-%C" \
-    -o ControlPersist=300
-}
-
-lxplus_resolve_control_path() {
-  # resolve concrete controlpath from current ssh config/token expansion
-  local host="$1"
-  command ssh -G "$KERBEROS_USER@$host" 2>/dev/null | command awk '/^controlpath / {print $2; exit}'
-}
-
-lxplus_expect_prime_master() {
-  # interactive expect flow: inject otp, then hand terminal to ssh session
-  local cc="$1" host="$2"
-  shift 2
-  local -a ssh_parts
-  ssh_parts=(ssh -tt "$@" "$KERBEROS_USER@$host")
-  local ssh_cmd_q
-  ssh_cmd_q="$(printf '%q ' "${ssh_parts[@]}")"
-
+lxplus_auto() {
   local RED=$'\033[1;31m'
   local GREEN=$'\033[1;32m'
   local BLUE=$'\033[1;34m'
   local MAGENTA=$'\033[1;35m'
   local RESET=$'\033[0m'
-  local rc
+
+  local use_mux=1
+  local node_arg=""
+  local host cc rc
+  local -a mux_opts
+  local ssh_cmd_q
+
+  # Keep argument semantics aligned with lxplus()
+  if [[ "$1" == "nomux" ]]; then
+    use_mux=0
+    shift
+  fi
+
+  node_arg="${1:-}"
+  host="$(lxplus_host_from_arg "$node_arg")" || return 1
+
+  mux_opts=($(ssh_opts_for_mux "$use_mux"))
+
+  # If mux is enabled and a master already exists, just reuse it.
+  # No 2FA handling needed in that case.
+  if (( use_mux )) && command ssh -O check "$host" >/dev/null 2>&1; then
+    printf '%b[✔]%b Existing lxplus master detected; reusing it\n' "$GREEN" "$RESET"
+    command ssh -tt "${mux_opts[@]}" "$host"
+    return $?
+  fi
+
+  # Reuse your existing Kerberos machinery exactly as-is.
+  if ! get_CERN_kerberos_ticket; then
+    printf '%b[✘]%b SSH aborted — Kerberos authentication failed.\n' "$RED" "$RESET" >&2
+    return 1
+  fi
+
+  cc="${LAST_KRB5CCNAME:-$(cc_root)}"
+  [[ -n "$cc" ]] || {
+    printf '%b[✘]%b Internal error: no Kerberos cache selected.\n' "$RED" "$RESET" >&2
+    return 1
+  }
+
+  # Build the exact ssh invocation once, shell-quoted for the child shell used by Expect.
+  # Keep the launch shape that actually worked in your environment: sh -lc "exec ssh ..."
+  ssh_cmd_q="$(printf '%q ' \
+    ssh -tt \
+    "${mux_opts[@]}" \
+    -o GSSAPIAuthentication=yes \
+    -o GSSAPIDelegateCredentials=yes \
+    -o PubkeyAuthentication=no \
+    -o PreferredAuthentications=gssapi-with-mic,keyboard-interactive \
+    "$host"
+  )"
 
   printf '%b[→]%b Starting direct ssh to %s\n' "$BLUE" "$RESET" "$host"
   printf '%b[2FA]%b Waiting for CERN second-factor prompt\n' "$MAGENTA" "$RESET"
@@ -1204,7 +1798,7 @@ lxplus_expect_prime_master() {
   SSH_EXPECT_CCACHE="$cc" \
   SSH_EXPECT_SSH_CMD_Q="$ssh_cmd_q" \
   SSH_EXPECT_ZDOTDIR="${ZDOTDIR:-$HOME}" \
-  command expect <<'EOF'
+  /usr/bin/expect <<'EOF'
 set timeout 30
 log_user 1
 match_max 100000
@@ -1223,6 +1817,7 @@ proc child_exit {sid} {
 }
 
 proc fresh_otp {zdot} {
+    # Generate as late as possible, and avoid the rollover edge.
     set remain [expr {30 - ([clock seconds] % 30)}]
     if {$remain <= 2} {
         after [expr {($remain + 1) * 1000}]
@@ -1239,24 +1834,19 @@ proc fresh_otp {zdot} {
     return $otp
 }
 
-proc tty_sanitize {tty_sid} {
-    catch {exec sh -c {stty sane < /dev/tty}}
-    # Reset cursor-key mode to "normal" (not application mode)
-    if {$tty_sid ne ""} {
-        catch {send -i $tty_sid -- "\033\133?1l\033>"}
-    }
-}
-
+# Important:
+# - keep sh -lc "exec ssh ..." because direct spawn ssh did not work reliably for you
+# - bind KRB5CCNAME explicitly from the already-acquired CERN cache
 spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
-set ssh_spawn_id $spawn_id
-set tty_spawn_id ""
 
-if {[catch {set tty_fd [open /dev/tty r+]}]} {
+set ssh_spawn_id $spawn_id
+
+# Because Expect is reading this script from a here-doc, its stdin is not your terminal.
+# Therefore interact must be attached explicitly to /dev/tty.
+if {![info exists tty_spawn_id]} {
     puts stderr "\nlxplus_auto: /dev/tty unavailable; cannot attach session to your terminal."
     child_exit $ssh_spawn_id
 }
-spawn -open $tty_fd
-set tty_spawn_id $spawn_id
 
 expect_before {
     -re {Enter passphrase for key .*:\s*$} {
@@ -1271,157 +1861,46 @@ expect_before {
 
 expect {
     -re {Your 2nd factor \([^)]+\):\s*$} {
+        # This small delay mattered in your setup.
         after 250
+
         send -- "[fresh_otp $zdot]\r"
-        set saved_tty ""
-        if {![catch {exec sh -c {stty -g < /dev/tty}} saved_tty]} {
-            catch {exec sh -c {stty raw -echo < /dev/tty}}
-        }
-        set interact_rc [catch {
-            interact \
+
+        # Do NOT use a greedy catch-all regex after OTP.
+        # Do NOT exp_continue into a timeout path after OTP.
+        # Hand control directly to the real tty.
+        set saved_tty [stty -g < /dev/tty]
+        stty raw -echo < /dev/tty
+
+        interact \
             -input  $tty_spawn_id -output $ssh_spawn_id \
             -input  $ssh_spawn_id -output $tty_spawn_id
-        } interact_err]
-        if {$saved_tty ne ""} {
-            catch {exec sh -c "stty $saved_tty < /dev/tty"}
-        }
-        if {$interact_rc} {
-            puts stderr "\nlxplus_auto: terminal handoff failed: $interact_err"
-        }
-        tty_sanitize $tty_spawn_id
-        child_exit $ssh_spawn_id
-    }
 
-    -re {(?i)permission denied|authentication failed|access denied} {
-        puts stderr "\nlxplus_auto: authentication failed."
-        tty_sanitize $tty_spawn_id
+        stty $saved_tty < /dev/tty
+        
         child_exit $ssh_spawn_id
     }
 
     timeout {
         puts stderr "\nlxplus_auto: timed out before the 2FA prompt."
-        tty_sanitize $tty_spawn_id
         child_exit $ssh_spawn_id
     }
 
     eof {
-        tty_sanitize $tty_spawn_id
         child_exit $ssh_spawn_id
     }
 }
 EOF
 
   rc=$?
+
   if (( rc == 0 )); then
-    printf '%b[✔]%b lxplus multiplex master is ready\n' "$GREEN" "$RESET"
+    printf '%b[✔]%b lxplus session ended normally\n' "$GREEN" "$RESET"
   else
-    printf '%b[✘]%b lxplus_auto master priming failed with code %s\n' "$RED" "$RESET" "$rc" >&2
+    printf '%b[✘]%b lxplus_auto exited with code %s\n' "$RED" "$RESET" "$rc" >&2
   fi
 
   return "$rc"
-}
-
-lxplus() {
-    # primary lxplus entrypoint: manual mode or auto-otp mux priming mode
-    local use_mux=1
-    local node_arg=""
-    local auto_otp=0
-
-    if [[ "$1" == "nomux" ]]; then
-      use_mux=0
-      shift
-    fi
-
-    node_arg="${1:-}"
-    local host; host="$(lxplus_host_from_arg "$node_arg")"
-
-    local -a mux_opts
-    mux_opts=($(ssh_opts_for_mux "$use_mux"))
-
-    if is_truthy "${LXPLUS_AUTO_OTP:-0}"; then
-      auto_otp=1
-    fi
-
-    if ! get_CERN_kerberos_ticket; then
-      echo "[✘] SSH aborted — Kerberos authentication failed."
-      return 1
-    fi
-
-    local cc="${LAST_KRB5CCNAME:-$(cc_root)}"
-    [[ -n "$cc" ]] || {
-      echo "[✘] Internal error: no Kerberos cache selected."
-      return 1
-    }
-
-    local -a ssh_auth_opts
-    ssh_auth_opts=($(lxplus_ssh_auth_opts))
-    local control_path
-    control_path="$(lxplus_resolve_control_path "$host")"
-    if [[ -z "$control_path" ]]; then
-      echo "[✘] Could not resolve ssh ControlPath for $host."
-      return 1
-    fi
-    local -a auto_mux_opts
-    auto_mux_opts=(
-      -o ControlMaster=auto
-      -o ControlPath="$control_path"
-      -o ControlPersist=300
-    )
-
-    if (( auto_otp && use_mux )) && ssh_mux_master_exists "$host" "${auto_mux_opts[@]}"; then
-      printf '\033[1;32m[✔]\033[0m Existing lxplus master detected; reusing it\n'
-      KRB5CCNAME="$cc" command ssh -tt "${auto_mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
-      return $?
-    fi
-
-    if (( auto_otp )); then
-      command -v expect >/dev/null 2>&1 || {
-        echo "[✘] expect not found; install expect for lxplus_auto."
-        return 1
-      }
-      command -v zsh >/dev/null 2>&1 || {
-        echo "[✘] zsh not found; lxplus_auto requires zsh for cern_totp_code."
-        return 1
-      }
-      if (( use_mux )); then
-        lxplus_expect_prime_master "$cc" "$host" "${auto_mux_opts[@]}" "${ssh_auth_opts[@]}"
-        return $?
-      fi
-
-      lxplus_expect_prime_master "$cc" "$host" "${mux_opts[@]}" "${ssh_auth_opts[@]}"
-      return $?
-    fi
-
-    print_cern_otp_hint
-
-    KRB5CCNAME="$cc" command ssh -XYACv "${mux_opts[@]}" "${ssh_auth_opts[@]}" "$KERBEROS_USER@$host"
-}
-
-lxfiles() {
-    # mount lxplus filesystem via sshfs; reuse mux when available
-    local use_mux=1
-    local remote_dir="/"
-
-    if [[ "$1" == "nomux" ]]; then
-      use_mux=0
-      shift
-    fi
-
-    remote_dir="${1:-/}"
-
-    local -a mux_opts
-    mux_opts=($(ssh_opts_for_mux "$use_mux"))
-
-    if ! (( use_mux )) || ! ssh_mux_master_exists "lxplus.cern.ch" "${mux_opts[@]}"; then
-      print_cern_otp_hint
-    fi
-
-    sshfs_mount get_CERN_kerberos_ticket "lxplus.cern.ch" "/mnt/lxfiles" 0 "$remote_dir" "${mux_opts[@]}"
-}
-
-lxplus_auto() {
-  # convenience wrapper: same parser/logic as lxplus, auto otp enabled
-  LXPLUS_AUTO_OTP=1 lxplus "$@"
 }
 
 FNAL_REALM="FNAL.GOV"
@@ -1433,7 +1912,6 @@ FNAL_KEYTAB="$HOME/.keytabs/${KERBEROS_USER}_fnal.keytab"
 #   wkt ~/mwadud_fnal.keytab
 # Then test: kinit -k -t ~/mwadud_fnal.keytab mwadud@FNAL.GOV
 get_LPC_kerberos_ticket() {
-    # thin realm-specific wrapper
     get_kerberos_ticket "$FNAL_PRINCIPAL" "$FNAL_KEYTAB"
 }
 
@@ -1442,7 +1920,6 @@ destroy_fnal_mwadud() {
 }
 
 fermi() {
-    # lpc login wrapper selecting node family then using common ssh launcher
     local node
     case $1 in
         el8)
@@ -1472,7 +1949,6 @@ fermi() {
 }
 
 fermifiles() {
-    # lpc sshfs mount wrapper
     local remote_dir="${1:-/}"
     sshfs_mount get_LPC_kerberos_ticket "cmslpc-el9.fnal.gov" "/mnt/fermi" 0 "$remote_dir"
 }
