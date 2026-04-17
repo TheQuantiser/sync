@@ -1263,8 +1263,13 @@ expect {
     -re {Your 2nd factor \([^)]+\):\s*$} {
         after 250
         send -- "[fresh_otp $zdot]\r"
-        tty_sanitize
-        interact -reset
+        set tty_spawn_id $user_spawn_id
+        set saved_tty [exec sh -c {stty -g < /dev/tty}]
+        exec sh -c {stty raw -echo < /dev/tty}
+        interact \
+            -input  $tty_spawn_id -output $ssh_spawn_id \
+            -input  $ssh_spawn_id -output $tty_spawn_id
+        catch {exec sh -c "stty $saved_tty < /dev/tty"}
         tty_sanitize
         child_exit $ssh_spawn_id
     }
