@@ -1239,14 +1239,24 @@ proc fresh_otp {zdot} {
     return $otp
 }
 
-proc tty_sanitize {} {
+proc tty_sanitize {tty_sid} {
     catch {exec sh -c {stty sane < /dev/tty}}
     # Reset cursor-key mode to "normal" (not application mode)
-    send_user -- "\033\133?1l\033>"
+    if {$tty_sid ne ""} {
+        catch {send -i $tty_sid -- "\033\133?1l\033>"}
+    }
 }
 
 spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
 set ssh_spawn_id $spawn_id
+set tty_spawn_id ""
+
+if {[catch {set tty_fd [open /dev/tty r+]}]} {
+    puts stderr "\nlxplus_auto: /dev/tty unavailable; cannot attach session to your terminal."
+    child_exit $ssh_spawn_id
+}
+spawn -open $tty_fd
+set tty_spawn_id $spawn_id
 
 expect_before {
     -re {Enter passphrase for key .*:\s*$} {
@@ -1263,31 +1273,39 @@ expect {
     -re {Your 2nd factor \([^)]+\):\s*$} {
         after 250
         send -- "[fresh_otp $zdot]\r"
-        set tty_spawn_id $user_spawn_id
-        set saved_tty [exec sh -c {stty -g < /dev/tty}]
-        exec sh -c {stty raw -echo < /dev/tty}
-        interact \
+        set saved_tty ""
+        if {![catch {exec sh -c {stty -g < /dev/tty}} saved_tty]} {
+            catch {exec sh -c {stty raw -echo < /dev/tty}}
+        }
+        set interact_rc [catch {
+            interact \
             -input  $tty_spawn_id -output $ssh_spawn_id \
             -input  $ssh_spawn_id -output $tty_spawn_id
-        catch {exec sh -c "stty $saved_tty < /dev/tty"}
-        tty_sanitize
+        } interact_err]
+        if {$saved_tty ne ""} {
+            catch {exec sh -c "stty $saved_tty < /dev/tty"}
+        }
+        if {$interact_rc} {
+            puts stderr "\nlxplus_auto: terminal handoff failed: $interact_err"
+        }
+        tty_sanitize $tty_spawn_id
         child_exit $ssh_spawn_id
     }
 
     -re {(?i)permission denied|authentication failed|access denied} {
         puts stderr "\nlxplus_auto: authentication failed."
-        tty_sanitize
+        tty_sanitize $tty_spawn_id
         child_exit $ssh_spawn_id
     }
 
     timeout {
         puts stderr "\nlxplus_auto: timed out before the 2FA prompt."
-        tty_sanitize
+        tty_sanitize $tty_spawn_id
         child_exit $ssh_spawn_id
     }
 
     eof {
-        tty_sanitize
+        tty_sanitize $tty_spawn_id
         child_exit $ssh_spawn_id
     }
 }
