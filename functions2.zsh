@@ -1309,17 +1309,22 @@ check_gpe6e_interrupt() {
 
 # LXPLUS and LPC username
 KERBEROS_USER="mwadud"
-# export KRB5CCNAME="DIR:$HOME/.krb5cc_shared"
-
+typeset -g KERBEROS_ALLOW_PASSWORD_FALLBACK=0
+typeset -g LXPLUS_DEBUG=0
 typeset -g LAST_KRB5CCNAME=""
 
 cc_root() {
-  # Always compute from HOME, never from a possibly-empty intermediate var
   printf 'DIR:%s/.krb5cc_shared' "$HOME"
 }
 
+is_truthy() {
+  case "${1:l}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_ccroot() {
-  # Create the real directory that backs the collection (no-op if it exists)
   local dir="$HOME/.krb5cc_shared"
   if [[ ! -d "$dir" ]]; then
     umask 077
@@ -1328,17 +1333,12 @@ ensure_ccroot() {
   fi
 }
 
-# Returns the cache PATH (e.g. "DIR::/home/.../tktXYZ") for a given principal
 ccache_for_principal() {
   local principal="$1"
   command klist -A 2>/dev/null | command awk -v P="$principal" '
-    /^Ticket cache:/ {
-      cache=$0; sub(/^Ticket cache: */,"",cache);
-      dp="";
-      next
-    }
+    /^Ticket cache:/ { cache=$0; sub(/^Ticket cache: */,"",cache); dp=""; next }
     /^Default principal:/ {
-      dp=$0; sub(/^Default principal: */,"",dp);
+      dp=$0; sub(/^Default principal: */,"",dp)
       if (cache != "" && dp == P) { print cache; exit }
     }'
 }
@@ -1346,82 +1346,42 @@ ccache_for_principal() {
 ensure_keytab_perms() {
   local keytab="$1"
   [[ -f "$keytab" ]] || return 0
-
   local mode
   mode=$(stat -c %a -- "$keytab" 2>/dev/null) || return 0
-
-  # last two octal digits must be 00 (no group/other perms)
   if [[ "${mode[-2,-1]}" != "00" ]]; then
     echo "[⚠] Insecure permissions on $keytab (mode $mode). Fixing to 600."
-    command chmod 600 -- "$keytab" 2>/dev/null || {
-      echo "[✘] Could not chmod 600 $keytab"
-      return 1
-    }
+    command chmod 600 -- "$keytab" 2>/dev/null || return 1
   fi
 }
 
 destroy_kerberos_ticket() {
-  local principal="$1" verbose="$2" cache_path
-
-  [[ "$verbose" == "--verbose" ]] && echo "=== [INFO] Destroying cache for: $principal ==="
-
+  local principal="$1" cache_path
   cache_path="$(ccache_for_principal "$principal")"
-  if [[ -z "$cache_path" ]]; then
-    echo "[ℹ] No ticket found for $principal."
-    return 0
-  fi
-
-  # Sanity-check cache type
+  [[ -n "$cache_path" ]] || return 0
   if [[ "$cache_path" != DIR::* && "$cache_path" != FILE:* && "$cache_path" != KEYRING:* && "$cache_path" != KCM:* ]]; then
-    echo "[⚠] Unrecognized cache type: $cache_path (refusing to touch)"
+    echo "[⚠] Unrecognized cache type: $cache_path"
     return 1
   fi
-
-  [[ "$verbose" == "--verbose" ]] && echo "[✔] Cache: $cache_path"
-
-  if KRB5CCNAME="$cache_path" command kdestroy 2>/dev/null; then
-    echo "[✔] Kerberos ticket for $principal destroyed."
-  else
-    echo "[⚠] kdestroy failed for $cache_path."
+  if ! KRB5CCNAME="$cache_path" command kdestroy 2>/dev/null; then
     if [[ "$cache_path" == DIR::* ]]; then
       local f="$cache_path"
-      f="${f#DIR::}"
-      f="${f#DIR:}"
-      if [[ "$f" == "$HOME/.krb5cc_shared/"* ]]; then
-        command rm -f -- "$f" && echo "[✔] Manually removed cache file $f."
-      else
-        echo "[⚠] Refusing to remove unexpected path: $f"
-      fi
+      f="${f#DIR::}"; f="${f#DIR:}"
+      [[ "$f" == "$HOME/.krb5cc_shared/"* ]] && command rm -f -- "$f"
     fi
   fi
-
-  if [[ -n "$(ccache_for_principal "$principal")" ]]; then
-    echo "[⚠] Ticket for $principal still appears present."
-  else
-    echo "[✓] Ticket for $principal fully removed."
-  fi
-
-  [[ "$verbose" == "--verbose" ]] && echo "=== [END OF DEBUG] ==="
 }
 
 get_kerberos_ticket() {
   local principal="$1" keytab="$2"
+  local allow_password_fallback="${3:-$KERBEROS_ALLOW_PASSWORD_FALLBACK}"
+  local fallback_allowed=0
   local realm="${principal##*@}"
-  local current_cache="" default_principal="" exp="" ren=""
-  local found=0
+  local current_cache="" default_principal="" exp="" ren="" found=0
 
-  local RESET="\033[0m" BOLD="\033[1m" GREEN="\033[1;32m" RED="\033[1;31m" \
-        YELLOW="\033[1;33m" CYAN="\033[1;36m" BLUE="\033[1;34m"
-
+  is_truthy "$allow_password_fallback" && fallback_allowed=1
   ensure_ccroot || return 1
   local collection; collection="$(cc_root)"
-  if [[ -z "$collection" || "$collection" == "DIR:" ]]; then
-    echo -e "${RED}[✘]${RESET} Internal error: empty collection root."
-    return 1
-  fi
-
-  # -------- Find the cache that corresponds to THIS principal --------
-  current_cache="" exp="" ren="" default_principal="" found=0
+  [[ -n "$collection" && "$collection" != "DIR:" ]] || return 1
 
   while IFS= read -r line; do
     if [[ "$line" == Ticket\ cache:* ]]; then
@@ -1429,13 +1389,10 @@ get_kerberos_ticket() {
       default_principal=""
       continue
     fi
-
     if [[ "$line" == Default\ principal:* ]]; then
       default_principal="${line#Default principal: }"
       continue
     fi
-
-    # Only accept within the correct principal section
     if [[ "$default_principal" == "$principal" && "$line" == *"krbtgt/$realm"* ]]; then
       exp=$(command awk '{print $3 " " $4}' <<< "$line")
       found=1
@@ -1444,513 +1401,256 @@ get_kerberos_ticket() {
   done < <(command klist -A 2>/dev/null)
 
   if (( found == 1 )) && [[ -n "$current_cache" ]]; then
-    # Best-effort renewable-until extraction; format varies across implementations.
     ren=$(KRB5CCNAME="$current_cache" command klist -f 2>/dev/null | command awk '/renew until/ {print $3 " " $4; exit}')
     [[ -z "$ren" ]] && ren="(unknown)"
-
     local epoch_exp epoch_ren=0 epoch_now
     epoch_exp=$(command date -d "$exp" +%s 2>/dev/null || echo 0)
-    if [[ "$ren" != "(unknown)" ]]; then
-      epoch_ren=$(command date -d "$ren" +%s 2>/dev/null || echo 0)
-    fi
+    [[ "$ren" != "(unknown)" ]] && epoch_ren=$(command date -d "$ren" +%s 2>/dev/null || echo 0)
     epoch_now=$(command date +%s)
-
     if (( epoch_exp > epoch_now )); then
-      echo -e "${GREEN}[✔]${RESET} ${BOLD}$principal${RESET} ticket valid — ${CYAN}expires:${RESET} ${BLUE}$exp${RESET} ${CYAN}| renewable until:${RESET} ${BLUE}$ren${RESET}"
       LAST_KRB5CCNAME="$current_cache"
       return 0
     fi
-
-    # Expired: attempt renewal if renewable-until parse worked and indicates still renewable
-    if (( epoch_ren > epoch_now )); then
-      echo -e "${YELLOW}[⟳]${RESET} ${BOLD}$principal${RESET} ticket expired, attempting ${CYAN}renewal${RESET}..."
-      if KRB5CCNAME="$current_cache" command kinit -R 2>/dev/null; then
-        echo -e "${GREEN}[✔]${RESET} Ticket successfully ${CYAN}renewed${RESET}."
-        LAST_KRB5CCNAME="$current_cache"
-        return 0
-      else
-        echo -e "${RED}[!!]${RESET} Ticket renewal ${BOLD}failed${RESET}."
-      fi
-    else
-      echo -e "${RED}[✘]${RESET} Ticket expired and ${BOLD}not renewable${RESET}."
+    if (( epoch_ren > epoch_now )) && KRB5CCNAME="$current_cache" command kinit -R 2>/dev/null; then
+      LAST_KRB5CCNAME="$current_cache"
+      return 0
     fi
-  else
-    echo -e "${RED}[✘]${RESET} No valid ticket found for ${BOLD}$principal${RESET}."
   fi
 
-  echo -e "${CYAN}[→]${RESET} Attempting to ${YELLOW}obtain new ticket${RESET} for ${BOLD}$principal${RESET}..."
   destroy_kerberos_ticket "$principal"
-
-  # -------- Obtain NEW creds into the collection root --------
   if [[ -f "$keytab" ]]; then
     ensure_keytab_perms "$keytab" || return 1
-
     if KRB5CCNAME="$collection" command kinit -l 168h -r 30d -k -t "$keytab" "$principal"; then
-      echo -e "${GREEN}[✔]${RESET} Ticket obtained using ${CYAN}keytab${RESET}."
       LAST_KRB5CCNAME="$(ccache_for_principal "$principal")"
       [[ -n "$LAST_KRB5CCNAME" ]] || LAST_KRB5CCNAME="$collection"
       return 0
-    else
-      echo -e "${RED}[!!]${RESET} Keytab authentication ${BOLD}failed${RESET}. Falling back to ${YELLOW}password prompt${RESET}."
     fi
+    (( fallback_allowed )) || { echo "[✘] Keytab auth failed for $principal and password fallback is disabled."; return 1; }
+  else
+    (( fallback_allowed )) || { echo "[✘] Keytab missing: $keytab (password fallback disabled)."; return 1; }
   fi
-
   if KRB5CCNAME="$collection" command kinit -l 168h -r 30d "$principal"; then
-    echo -e "${GREEN}[✔]${RESET} Ticket obtained via ${CYAN}password prompt${RESET}."
     LAST_KRB5CCNAME="$(ccache_for_principal "$principal")"
     [[ -n "$LAST_KRB5CCNAME" ]] || LAST_KRB5CCNAME="$collection"
     return 0
-  else
-    echo -e "${RED}[!!]${RESET} Password login ${BOLD}failed${RESET} for ${BOLD}$principal${RESET}."
-    return 1
   fi
+  return 1
 }
 
-
-# --- SSH option builders (zsh) ----------------------------------------------
-
-# Build ssh options for mux vs nomux.
-# Usage: ssh_opts_for_mux 0|1  (1 = mux, 0 = nomux)
 ssh_opts_for_mux() {
   local use_mux="${1:-1}"
-  local -a opts
-
   if [[ "$use_mux" -eq 1 ]]; then
-    # Let ~/.ssh/config control mux (ControlMaster auto, ControlPath ~/.ssh/cm-%C, etc.)
-    # Nothing required here.
-    opts=()
+    print -r --
   else
-    # Hard-disable client-side mux attachment.
-    # Critical: ControlPath=none prevents attaching to any existing master socket.
-    opts=(
-      -o ControlMaster=no
-      -o ControlPath=none
-      -o ControlPersist=no
-    )
+    print -r -- -o ControlMaster=no -o ControlPath=none -o ControlPersist=no
   fi
-
-  print -r -- "${opts[@]}"
 }
 
-# Normalize lxplus node argument.
-# Accepts:
-#   ""            -> lxplus.cern.ch
-#   "953"         -> lxplus953.cern.ch
-#   "lxplus953"   -> lxplus953.cern.ch
-#   "lxplus953.cern.ch" -> lxplus953.cern.ch
 lxplus_host_from_arg() {
   local arg="$1"
   if [[ -z "$arg" ]]; then
-    print -r -- "lxplus.cern.ch"
-    return 0
+    print -r -- "lxplus.cern.ch"; return 0
   fi
-
-  # Strip domain if present
   arg="${arg%.cern.ch}"
-
-  # If arg is digits, treat as suffix
-  if [[ "$arg" == <-> ]]; then
-    print -r -- "lxplus${arg}.cern.ch"
-    return 0
-  fi
-
-  # If arg starts with lxplus and then digits
-  if [[ "$arg" == lxplus<-> ]]; then
-    print -r -- "${arg}.cern.ch"
-    return 0
-  fi
-
-  # Otherwise: assume caller passed something sensible (e.g. a full host alias)
-  # You can choose to error instead, but this is “robust default”.
+  [[ "$arg" == <-> ]] && { print -r -- "lxplus${arg}.cern.ch"; return 0; }
+  [[ "$arg" == lxplus<-> ]] && { print -r -- "${arg}.cern.ch"; return 0; }
   print -r -- "${arg}.cern.ch"
 }
 
-remote_ssh_login() {
-  local get_ticket_func="$1"
-  local host="$2"
-  local fallback_ok="${3:-0}"
-  shift 3
-
-  local -a extra_ssh_opts
-  extra_ssh_opts=("$@")
-
-  if ! $get_ticket_func; then
-    if [[ "$fallback_ok" -eq 1 ]]; then
-      echo "[⚠] Kerberos ticket not obtained — continuing with password-based SSH."
-    else
-      echo "[✘] SSH aborted — Kerberos authentication failed."
-      return 1
-    fi
-  fi
-
-  local cc="${LAST_KRB5CCNAME:-$(cc_root)}"
-
-  echo "Connecting to $host ..."
-  KRB5CCNAME="$cc" command ssh -XYACv \
-    -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-    "${extra_ssh_opts[@]}" \
-    "$KERBEROS_USER@$host"
+ssh_mux_master_exists() {
+  local host="$1"; shift
+  command ssh -O check "$@" "$host" >/dev/null 2>&1
 }
 
+ssh_require_dependencies() {
+  local dep
+  for dep in "$@"; do
+    command -v "$dep" >/dev/null 2>&1 || { echo "[✘] Missing dependency: $dep"; return 1; }
+  done
+}
 
-sshfs_mount() {
-  local get_ticket_func="$1"
-  local remote="$2"
-  local mountpoint="${3:-$HOME/$(basename "$remote")}"
-  local fallback_ok="${4:-0}"
-  local remote_dir="${5:-/}"
-  shift 5
+ssh_dbg() {
+  (( LXPLUS_DEBUG )) || return 0
+  printf '[debug] %s\n' "$*"
+}
 
-  local -a extra_ssh_opts
-  extra_ssh_opts=("$@")
+lxplus_prime_mux_master_expect() {
+  local cc="$1" host="$2"; shift 2
+  local -a opts=("$@")
+  local ssh_cmd_q
+  ssh_cmd_q="$(printf '%q ' ssh -Nf -tt "${opts[@]}" "$KERBEROS_USER@$host")"
 
-  if ! $get_ticket_func; then
-    if [[ "$fallback_ok" -eq 1 ]]; then
-      echo "[⚠] Kerberos ticket not obtained — continuing with password-based SSH."
+  SSH_EXPECT_CCACHE="$cc" SSH_EXPECT_SSH_CMD_Q="$ssh_cmd_q" SSH_EXPECT_ZDOTDIR="${ZDOTDIR:-$HOME}" command expect <<'EOF'
+set timeout 30
+set ccache    $env(SSH_EXPECT_CCACHE)
+set ssh_cmd_q $env(SSH_EXPECT_SSH_CMD_Q)
+set zdot      $env(SSH_EXPECT_ZDOTDIR)
+
+proc fresh_otp {zdot} {
+    set remain [expr {30 - ([clock seconds] % 30)}]
+    if {$remain <= 2} { after [expr {($remain + 1) * 1000}] }
+    set raw [exec env ZDOTDIR=$zdot zsh -ic {cern_totp_code}]
+    set otp [string trim $raw]
+    if {![regexp {^[0-9]{6}$} $otp]} { exit 97 }
+    return $otp
+}
+
+spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
+expect_before {
+    -re {Enter passphrase for key .*:\s*$} { exit 96 }
+    -re {(?i)(^|\n).*password:\s*$} { exit 95 }
+}
+expect {
+    -re {Your 2nd factor \([^)]+\):\s*$} {
+        after 250
+        send -- "[fresh_otp $zdot]\r"
+        exp_continue
+    }
+    -re {Authenticated to|Entering interactive session|muxserver_listen|Control socket} { exit 0 }
+    eof {
+      set st [wait]
+      set rc [lindex $st 3]
+      if {$rc eq ""} { set rc 0 }
+      exit $rc
+    }
+    timeout { exit 94 }
+}
+EOF
+}
+
+ssh_connection_spine() {
+  local site="$1" mode="$2" host="$3"
+  local use_mux="${4:-1}" auto_otp="${5:-0}" tty_mode="${6:-1}"
+
+  local principal keytab want_tty
+  case "$site" in
+    cern) principal="$CERN_PRINCIPAL"; keytab="$CERN_KEYTAB" ;;
+    fnal) principal="$FNAL_PRINCIPAL"; keytab="$FNAL_KEYTAB"; auto_otp=0 ;;
+    *) echo "[✘] Unknown site: $site"; return 1 ;;
+  esac
+
+  local fallback=0
+  if [[ "$mode" == "interactive" ]] && is_truthy "${KERBEROS_ALLOW_PASSWORD_FALLBACK:-0}"; then
+    fallback=1
+  fi
+
+  get_kerberos_ticket "$principal" "$keytab" "$fallback" || return 1
+  local cc="${LAST_KRB5CCNAME:-$(cc_root)}"
+  local -a mux_opts ssh_common
+  mux_opts=($(ssh_opts_for_mux "$use_mux"))
+  ssh_common=(
+    -o GSSAPIAuthentication=yes
+    -o GSSAPIDelegateCredentials=yes
+    -o PreferredAuthentications=gssapi-with-mic,keyboard-interactive
+    -o PubkeyAuthentication=no
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=3
+  )
+  want_tty=""
+  [[ "$tty_mode" -eq 1 ]] && want_tty="-tt"
+
+  ssh_dbg "site=$site mode=$mode host=$host use_mux=$use_mux auto_otp=$auto_otp"
+  ssh_dbg "ccache=$cc"
+  ssh_dbg "controlpath=$(command ssh -G "$KERBEROS_USER@$host" 2>/dev/null | command awk '/^controlpath /{print $2; exit}')"
+
+  if [[ "$auto_otp" -eq 1 && "$use_mux" -eq 1 ]]; then
+    ssh_require_dependencies expect zsh || return 1
+    if ! ssh_mux_master_exists "$host" "${mux_opts[@]}"; then
+      lxplus_prime_mux_master_expect "$cc" "$host" "${ssh_common[@]}" "${mux_opts[@]}" || return 1
+      ssh_dbg "mux attach=new-master"
     else
-      echo "[✘] Mount aborted — Kerberos authentication failed."
-      return 1
+      ssh_dbg "mux attach=existing-master"
     fi
   fi
 
-  command mkdir -p -- "$mountpoint"
-
-  if mount | command grep -q -- "$mountpoint"; then
-    echo "[ℹ] Already mounted at $mountpoint"
-    return 0
+  if [[ "$mode" == "sshfs" ]]; then
+    local mountpoint="${7:?missing mountpoint}"
+    local remote_dir="${8:-/}"
+    mkdir -p -- "$mountpoint"
+    mount | command grep -q -- "$mountpoint" && { echo "[ℹ] Already mounted at $mountpoint"; return 0; }
+    local -a ssh_cmd
+    ssh_cmd=(ssh "${ssh_common[@]}" "${mux_opts[@]}")
+    local ssh_cmd_str="${(j: :)${(q)ssh_cmd[@]}}"
+    KRB5CCNAME="$cc" command sshfs -o reconnect,auto_cache,follow_symlinks -o "ssh_command=$ssh_cmd_str" "$KERBEROS_USER@$host:$remote_dir" "$mountpoint"
+    return $?
   fi
 
-  local cc="${LAST_KRB5CCNAME:-$(cc_root)}"
-
-  local -a ssh_cmd
-  ssh_cmd=(ssh
-    -o ServerAliveInterval=15 -o ServerAliveCountMax=3
-    "${extra_ssh_opts[@]}"
-  )
-
-  # Shell-escape each token for sshfs's ssh_command string
-  local ssh_cmd_str
-  ssh_cmd_str="${(j: :)${(q)ssh_cmd[@]}}"
-
-  echo "[…] Mounting $remote_dir from $remote to $mountpoint"
-  if KRB5CCNAME="$cc" command sshfs \
-       -o reconnect,auto_cache,follow_symlinks \
-       -o "ssh_command=$ssh_cmd_str" \
-       "$KERBEROS_USER@$remote:$remote_dir" "$mountpoint"; then
-    echo "[✔] Mounted successfully at $mountpoint"
-    return 0
-  else
-    echo "[!!] SSHFS mount failed — check network or credentials."
-    return 1
-  fi
+  KRB5CCNAME="$cc" command ssh $want_tty -XYACv "${ssh_common[@]}" "${mux_opts[@]}" "$KERBEROS_USER@$host"
 }
 
 CERN_REALM="CERN.CH"
 CERN_PRINCIPAL="$KERBEROS_USER@$CERN_REALM"
 CERN_KEYTAB="$HOME/.keytabs/${KERBEROS_USER}_cern.keytab"
-# Wrapper to get CERN Kerberos ticket.
-# Generate keytab on lxplus.cern.ch using:
-#   cern-get-keytab --keytab ~/mwadud_cern.keytab --user --login mwadud
-# Then scp it locally: scp mwadud@lxplus.cern.ch:~/mwadud_cern.keytab ~/
-# Docs: https://linux.web.cern.ch/docs/kerberos-access/
-get_CERN_kerberos_ticket() {
-    get_kerberos_ticket "$CERN_PRINCIPAL" "$CERN_KEYTAB"
-}
 
-destroy_cern_mwadud() {
-    destroy_kerberos_ticket "$CERN_PRINCIPAL"
-}
+get_CERN_kerberos_ticket() { get_kerberos_ticket "$CERN_PRINCIPAL" "$CERN_KEYTAB" 0; }
+destroy_cern_mwadud() { destroy_kerberos_ticket "$CERN_PRINCIPAL"; }
 
-# --- CERN TOTP helper ---------------------------------------------------------
 cern_totp_code() {
   local secret_file="${1:-$HOME/.ssh/cern-totp.secret}"
   local raw secret
-
-  [[ -r "$secret_file" ]] || {
-    printf '\033[1;31m[✘]\033[0m TOTP secret file not readable: %s\n' "$secret_file" >&2
-    return 1
-  }
-
-  command -v oathtool >/dev/null 2>&1 || {
-    printf '\033[1;31m[✘]\033[0m oathtool not found. Install oath-toolkit.\n' >&2
-    return 1
-  }
-
+  [[ -r "$secret_file" ]] || { echo "[✘] TOTP secret file not readable: $secret_file" >&2; return 1; }
+  command -v oathtool >/dev/null 2>&1 || { echo "[✘] oathtool not found." >&2; return 1; }
   raw="$(tr -d '[:space:]' < "$secret_file")"
-
-  # Accept either:
-  #   - raw Base32 secret
-  #   - full otpauth:// URI
   if [[ "$raw" == otpauth://* ]]; then
     secret="$(printf '%s\n' "$raw" | sed -n 's/.*[?&]secret=\([^&]*\).*/\1/p')"
   else
     secret="$raw"
   fi
-
-  [[ -n "$secret" ]] || {
-    printf '\033[1;31m[✘]\033[0m Could not extract TOTP secret from %s\n' "$secret_file" >&2
-    return 1
-  }
-
+  [[ -n "$secret" ]] || return 1
   oathtool --totp -b -- "$secret"
 }
 
-lxplus() {
-    local use_mux=1
-    local node_arg=""
-
-    if [[ "$1" == "nomux" ]]; then
-      use_mux=0
-      shift
-    fi
-
-    node_arg="${1:-}"
-    local host; host="$(lxplus_host_from_arg "$node_arg")"
-
-    local -a mux_opts
-    mux_opts=($(ssh_opts_for_mux "$use_mux"))
-
-    local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
+print_cern_otp_hint() {
+  local otp
+  if otp="$(cern_totp_code 2>/dev/null)"; then
     printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
+  fi
+}
 
-    remote_ssh_login get_CERN_kerberos_ticket "$host" 1 "${mux_opts[@]}"
+lxplus() {
+  local use_mux=1 node_arg=""
+  [[ "$1" == "nomux" ]] && { use_mux=0; shift; }
+  node_arg="${1:-}"
+  local host; host="$(lxplus_host_from_arg "$node_arg")"
+  local auto_otp=0
+  is_truthy "${LXPLUS_AUTO_OTP:-0}" && auto_otp=1
+  (( auto_otp )) || print_cern_otp_hint
+  ssh_connection_spine cern interactive "$host" "$use_mux" "$auto_otp" 1
 }
 
 lxfiles() {
-    local use_mux=1
-    local remote_dir="/"
-
-    if [[ "$1" == "nomux" ]]; then
-      use_mux=0
-      shift
-    fi
-
-    remote_dir="${1:-/}"
-
-    local -a mux_opts
-    mux_opts=($(ssh_opts_for_mux "$use_mux"))
-
-    local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
-    printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
-
-    sshfs_mount get_CERN_kerberos_ticket "lxplus.cern.ch" "/mnt/lxfiles" 1 "$remote_dir" "${mux_opts[@]}"
+  local use_mux=1 remote_dir="/"
+  [[ "$1" == "nomux" ]] && { use_mux=0; shift; }
+  remote_dir="${1:-/}"
+  ssh_connection_spine cern sshfs "lxplus.cern.ch" "$use_mux" 0 0 "/mnt/lxfiles" "$remote_dir"
 }
 
 lxplus_auto() {
-  local RED=$'\033[1;31m'
-  local GREEN=$'\033[1;32m'
-  local BLUE=$'\033[1;34m'
-  local MAGENTA=$'\033[1;35m'
-  local RESET=$'\033[0m'
-
-  local use_mux=1
-  local node_arg=""
-  local host cc rc
-  local -a mux_opts
-  local ssh_cmd_q
-
-  # Keep argument semantics aligned with lxplus()
-  if [[ "$1" == "nomux" ]]; then
-    use_mux=0
-    shift
-  fi
-
-  node_arg="${1:-}"
-  host="$(lxplus_host_from_arg "$node_arg")" || return 1
-
-  mux_opts=($(ssh_opts_for_mux "$use_mux"))
-
-  # If mux is enabled and a master already exists, just reuse it.
-  # No 2FA handling needed in that case.
-  if (( use_mux )) && command ssh -O check "$host" >/dev/null 2>&1; then
-    printf '%b[✔]%b Existing lxplus master detected; reusing it\n' "$GREEN" "$RESET"
-    command ssh -tt "${mux_opts[@]}" "$host"
-    return $?
-  fi
-
-  # Reuse your existing Kerberos machinery exactly as-is.
-  if ! get_CERN_kerberos_ticket; then
-    printf '%b[✘]%b SSH aborted — Kerberos authentication failed.\n' "$RED" "$RESET" >&2
-    return 1
-  fi
-
-  cc="${LAST_KRB5CCNAME:-$(cc_root)}"
-  [[ -n "$cc" ]] || {
-    printf '%b[✘]%b Internal error: no Kerberos cache selected.\n' "$RED" "$RESET" >&2
-    return 1
-  }
-
-  # Build the exact ssh invocation once, shell-quoted for the child shell used by Expect.
-  # Keep the launch shape that actually worked in your environment: sh -lc "exec ssh ..."
-  ssh_cmd_q="$(printf '%q ' \
-    ssh -tt \
-    "${mux_opts[@]}" \
-    -o GSSAPIAuthentication=yes \
-    -o GSSAPIDelegateCredentials=yes \
-    -o PubkeyAuthentication=no \
-    -o PreferredAuthentications=gssapi-with-mic,keyboard-interactive \
-    "$host"
-  )"
-
-  printf '%b[→]%b Starting direct ssh to %s\n' "$BLUE" "$RESET" "$host"
-  printf '%b[2FA]%b Waiting for CERN second-factor prompt\n' "$MAGENTA" "$RESET"
-
-  SSH_EXPECT_CCACHE="$cc" \
-  SSH_EXPECT_SSH_CMD_Q="$ssh_cmd_q" \
-  SSH_EXPECT_ZDOTDIR="${ZDOTDIR:-$HOME}" \
-  /usr/bin/expect <<'EOF'
-set timeout 30
-log_user 1
-match_max 100000
-
-set ccache    $env(SSH_EXPECT_CCACHE)
-set ssh_cmd_q $env(SSH_EXPECT_SSH_CMD_Q)
-set zdot      $env(SSH_EXPECT_ZDOTDIR)
-
-proc child_exit {sid} {
-    if {[catch {wait -i $sid} result]} {
-        exit 1
-    }
-    set rc [lindex $result 3]
-    if {$rc eq ""} { set rc 0 }
-    exit $rc
-}
-
-proc fresh_otp {zdot} {
-    # Generate as late as possible, and avoid the rollover edge.
-    set remain [expr {30 - ([clock seconds] % 30)}]
-    if {$remain <= 2} {
-        after [expr {($remain + 1) * 1000}]
-    }
-
-    set raw [exec env ZDOTDIR=$zdot zsh -ic {cern_totp_code}]
-    set otp [string trim $raw]
-
-    if {![regexp {^[0-9]{6}$} $otp]} {
-        puts stderr "lxplus_auto: invalid OTP from cern_totp_code: <$otp>"
-        exit 97
-    }
-
-    return $otp
-}
-
-# Important:
-# - keep sh -lc "exec ssh ..." because direct spawn ssh did not work reliably for you
-# - bind KRB5CCNAME explicitly from the already-acquired CERN cache
-spawn env KRB5CCNAME=$ccache sh -lc "exec $ssh_cmd_q"
-
-set ssh_spawn_id $spawn_id
-
-# Because Expect is reading this script from a here-doc, its stdin is not your terminal.
-# Therefore interact must be attached explicitly to /dev/tty.
-if {![info exists tty_spawn_id]} {
-    puts stderr "\nlxplus_auto: /dev/tty unavailable; cannot attach session to your terminal."
-    child_exit $ssh_spawn_id
-}
-
-expect_before {
-    -re {Enter passphrase for key .*:\s*$} {
-        puts stderr "\nlxplus_auto: ssh asked for a key passphrase; unlock the key first."
-        exit 96
-    }
-    -re {(?i)(^|\n).*password:\s*$} {
-        puts stderr "\nlxplus_auto: ssh asked for a password; refusing to continue."
-        exit 95
-    }
-}
-
-expect {
-    -re {Your 2nd factor \([^)]+\):\s*$} {
-        # This small delay mattered in your setup.
-        after 250
-
-        send -- "[fresh_otp $zdot]\r"
-
-        # Do NOT use a greedy catch-all regex after OTP.
-        # Do NOT exp_continue into a timeout path after OTP.
-        # Hand control directly to the real tty.
-        set saved_tty [stty -g < /dev/tty]
-        stty raw -echo < /dev/tty
-
-        interact \
-            -input  $tty_spawn_id -output $ssh_spawn_id \
-            -input  $ssh_spawn_id -output $tty_spawn_id
-
-        stty $saved_tty < /dev/tty
-        
-        child_exit $ssh_spawn_id
-    }
-
-    timeout {
-        puts stderr "\nlxplus_auto: timed out before the 2FA prompt."
-        child_exit $ssh_spawn_id
-    }
-
-    eof {
-        child_exit $ssh_spawn_id
-    }
-}
-EOF
-
-  rc=$?
-
-  if (( rc == 0 )); then
-    printf '%b[✔]%b lxplus session ended normally\n' "$GREEN" "$RESET"
-  else
-    printf '%b[✘]%b lxplus_auto exited with code %s\n' "$RED" "$RESET" "$rc" >&2
-  fi
-
-  return "$rc"
+  LXPLUS_AUTO_OTP=1 lxplus "$@"
 }
 
 FNAL_REALM="FNAL.GOV"
 FNAL_PRINCIPAL="$KERBEROS_USER@$FNAL_REALM"
 FNAL_KEYTAB="$HOME/.keytabs/${KERBEROS_USER}_fnal.keytab"
-# Wrapper to get FNAL Kerberos ticket.
-# Generate keytab locally using ktutil:
-#   addent -password -p mwadud@FNAL.GOV -k 1 -e aes256-cts-hmac-sha1-96
-#   wkt ~/mwadud_fnal.keytab
-# Then test: kinit -k -t ~/mwadud_fnal.keytab mwadud@FNAL.GOV
-get_LPC_kerberos_ticket() {
-    get_kerberos_ticket "$FNAL_PRINCIPAL" "$FNAL_KEYTAB"
-}
 
-destroy_fnal_mwadud() {
-    destroy_kerberos_ticket "$FNAL_PRINCIPAL"
-}
+get_LPC_kerberos_ticket() { get_kerberos_ticket "$FNAL_PRINCIPAL" "$FNAL_KEYTAB" 0; }
+destroy_fnal_mwadud() { destroy_kerberos_ticket "$FNAL_PRINCIPAL"; }
 
 fermi() {
-    local node
-    case $1 in
-        el8)
-            node="cmslpc${2:-201}.fnal.gov"
-            [[ -z $2 || ( $2 -ge 201 && $2 -le 250 ) ]] || {
-                echo "Invalid el8 node: must be 201–250"; return 1; }
-            ;;
-        el9|"")
-            node="cmslpc${2:-301}.fnal.gov"
-            [[ -z $2 || ( $2 -ge 301 && $2 -le 350 ) ]] || {
-                echo "Invalid el9 node: must be 301–350"; return 1; }
-            ;;
-        heavy-el8)
-            node="cmslpc-el8-heavy0${2:-1}.fnal.gov"
-            [[ -z $2 || $2 -eq 1 || $2 -eq 2 ]] || {
-                echo "Invalid heavy-el8 node: must be 1 or 2"; return 1; }
-            ;;
-        heavy-el9)
-            node="cmslpc-el9-heavy01.fnal.gov"
-            ;;
-        *)
-            echo "Usage: fermi [el9|el8|heavy-el9|heavy-el8] [node#]"; return 1
-            ;;
-    esac
-
-    remote_ssh_login get_LPC_kerberos_ticket "$node" 0
+  local node
+  case $1 in
+    el8) node="cmslpc${2:-201}.fnal.gov" ;;
+    el9|"") node="cmslpc${2:-301}.fnal.gov" ;;
+    heavy-el8) node="cmslpc-el8-heavy0${2:-1}.fnal.gov" ;;
+    heavy-el9) node="cmslpc-el9-heavy01.fnal.gov" ;;
+    *) echo "Usage: fermi [el9|el8|heavy-el9|heavy-el8] [node#]"; return 1 ;;
+  esac
+  ssh_connection_spine fnal interactive "$node" 1 0 1
 }
 
 fermifiles() {
-    local remote_dir="${1:-/}"
-    sshfs_mount get_LPC_kerberos_ticket "cmslpc-el9.fnal.gov" "/mnt/fermi" 0 "$remote_dir"
+  local remote_dir="${1:-/}"
+  ssh_connection_spine fnal sshfs "cmslpc-el9.fnal.gov" 1 0 0 "/mnt/fermi" "$remote_dir"
 }
 
 hyperupdate() {

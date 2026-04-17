@@ -1,4 +1,4 @@
-Host lxplus lxplus_vscode lxplus.cern.ch lxplus???.cern.ch
+Host lxplus* lxplus.cern.ch
   User mwadud
 
   GSSAPIAuthentication yes
@@ -18,15 +18,19 @@ Host lxplus lxplus_vscode lxplus.cern.ch lxplus???.cern.ch
 
   ProxyCommand /bin/bash -lc "set -euo pipefail; export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_cern.keytab mwadud@CERN.CH >/dev/null; exec nc %h %p"
 
-Host lxplus lxplus_vscode lxplus.cern.ch
+Host lxplus
   HostName lxplus.cern.ch
 
-Host cmslpc*.fnal.gov cmslpc301 cmslpc_heavyel9 cmslpc_heavyel9_vscode
+Host lxplus_vscode
+  HostName lxplus.cern.ch
+  # Intentionally reuses default mux socket for terminal/vscode interoperability.
+
+Host cmslpc* cmslpc*.fnal.gov
   User mwadud
 
-  PreferredAuthentications gssapi-with-mic,publickey,keyboard-interactive
   GSSAPIAuthentication yes
   GSSAPIDelegateCredentials yes
+  PreferredAuthentications gssapi-with-mic,publickey,keyboard-interactive
 
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
@@ -47,29 +51,28 @@ Host cmslpc*.fnal.gov cmslpc301 cmslpc_heavyel9 cmslpc_heavyel9_vscode
 Host cmslpc301
   HostName cmslpc301.fnal.gov
 
-Host cmslpc_heavyel9 cmslpc_heavyel9_vscode
+Host cmslpc_heavyel9
   HostName cmslpc-el9-heavy01.fnal.gov
+
+Host cmslpc_heavyel9_vscode
+  HostName cmslpc-el9-heavy01.fnal.gov
+  # Intentionally reuses default mux socket for terminal/vscode interoperability.
 
 # CMS user head nodes
 Host cmsusr cmsusr* cmsusr*.cms
-  # .CMS username (from sysadmin mail)
   User mwadud
   Protocol 2
   ForwardAgent yes
   ForwardX11 yes
   ForwardX11Trusted no
 
-  # hop via lxplus
   ProxyCommand ssh lxplus nc %h 22
 
-  # SOCKS proxy for .cms web
   DynamicForward 1080
 
-  # RDP forwards (Linux OpenSSH style)
   LocalForward 5389 rdp1:3389
   LocalForward 6389 rdp2:3389
 
-  # Oracle DB forwards (usually not needed for shifts but harmless)
   LocalForward 10121 cmsonr1-v.cms:10121
   LocalForward 10122 cmsonr2-v.cms:10121
   LocalForward 10123 cmsonr3-v.cms:10121
@@ -77,7 +80,6 @@ Host cmsusr cmsusr* cmsusr*.cms
   LocalForward 10125 cmsintr1-v.cms:10121
   LocalForward 10126 cmsintr2-v.cms:10121
 
-# Direct access to P5 hosts / RDP once cmsusr connection exists
 Host rdp* *.cms 10.176.*.*
   User mwadud
   Protocol 2
