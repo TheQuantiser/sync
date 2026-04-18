@@ -1,8 +1,8 @@
-# LXPLUS End-to-End Setup (Self-Contained)
+# LXPLUS End-to-End Setup
 
-This file is self-contained. It includes all required instructions and all config/function blocks that must be added locally.
+This guide includes all required steps, configuration snippets, and shell-function blocks to complete the local setup.
 
-If you follow only this file, you can set up:
+Following this guide alone sets up:
 - Kerberos keytab-based ticket acquisition for CERN
 - CERN OTP/TOTP second factor handling
 - SSH ControlMaster multiplexing for faster reconnects
@@ -23,6 +23,7 @@ This setup uses:
 - Kerberos cache collection: `DIR:$HOME/.krb5cc_shared`
 - Keytab location: `~/.keytabs/USERNAME_cern.keytab`
 - TOTP secret file: `~/.ssh/cern-totp.secret`
+- Kerberos `libdefaults.default_ccache_name` aligned to the same cache collection path
 
 Replace `USERNAME` below with your CERN username.
 
@@ -45,10 +46,32 @@ mkdir -p ~/.ssh ~/.keytabs ~/.krb5cc_shared
 chmod 700 ~/.ssh ~/.keytabs ~/.krb5cc_shared
 ```
 
-Purpose:
-- `~/.keytabs`: stores Kerberos keytab
+Directory roles:
+- `~/.keytabs`: stores the Kerberos keytab
 - `~/.krb5cc_shared`: shared cache collection used by SSH and shell helpers
-- `~/.ssh`: stores SSH config and TOTP secret file
+- `~/.ssh`: stores SSH config and the TOTP secret file
+
+### 1.1 Align `krb5.conf` cache defaults with this setup
+
+In your Kerberos configuration (`/etc/krb5.conf` or an included override file), ensure this value is set under `[libdefaults]`:
+
+```ini
+default_ccache_name = DIR:/home/LOCAL_USERNAME/.krb5cc_shared
+```
+
+Replace `LOCAL_USERNAME` with your actual local account name.
+
+This path must match the cache directory used throughout this guide (`~/.krb5cc_shared`), or Kerberos tools may read/write a different cache when `KRB5CCNAME` is not explicitly exported.
+
+Quick verification:
+
+```bash
+# Show configured default cache
+grep -n "default_ccache_name" /etc/krb5.conf
+
+# Confirm directory exists and is restricted
+ls -ld ~/.krb5cc_shared
+```
 
 ---
 
@@ -77,8 +100,8 @@ kinit -kt ~/.keytabs/USERNAME_cern.keytab USERNAME@CERN.CH
 klist
 ```
 
-Purpose:
-- Confirms local keytab can obtain CERN ticket without password prompt.
+Why this is required:
+- Confirms the local keytab can obtain a CERN ticket without a password prompt.
 
 ---
 
@@ -124,14 +147,14 @@ Check file-based OTP generation:
 oathtool --totp -b -- "$(tr -d '[:space:]' < ~/.ssh/cern-totp.secret)"
 ```
 
-Purpose:
-- `lxplus_auto` and `lxplus` rely on this file to compute OTP codes on demand.
+Why this is required:
+- `lxplus_auto` and `lxplus` use this file to compute OTP codes on demand.
 
 ---
 
-## 4) Add SSH config (full block)
+## 4) Add SSH config
 
-Edit `~/.ssh/config` and add this block exactly (replace `USERNAME`):
+Edit `~/.ssh/config` and add this block exactly (replace `USERNAME` in all relevant fields):
 
 ```sshconfig
 # Primary lxplus entry; ProxyCommand preflights Kerberos cache+tickets before TCP connect.
@@ -186,16 +209,16 @@ Host lxplus??? lxplus???.cern.ch
   ProxyCommand /bin/bash -lc "export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; klist -s || kinit -l 168h -r 30d -k -t $HOME/.keytabs/USERNAME_cern.keytab USERNAME@CERN.CH; exec nc %h %p"
 ```
 
-Purpose:
-- Ensures GSSAPI auth path
-- Reuses multiplexed connections
-- Performs keytab-based Kerberos preflight before TCP connect
+What this config does:
+- Enforces the GSSAPI authentication path
+- Reuses multiplexed SSH connections
+- Runs keytab-based Kerberos preflight before opening TCP
 
 ---
 
-## 5) Add shell functions to your `.zshrc` (full required block)
+## 5) Add shell functions to your `.zshrc`
 
-Add the following block directly to your `~/.zshrc` (replace `USERNAME`):
+Add the following block directly to your `~/.zshrc` (replace `USERNAME` where applicable):
 
 ```zsh
 # ---------- Identity ----------
@@ -918,8 +941,8 @@ mux-close() { muxctl close "$@"; }
 mux-prune() { muxctl prune "$@"; }
 ```
 
-Purpose:
-- Provides all required logic locally inside your shell startup file; no dependency on external project files.
+What this block provides:
+- Includes all required local shell logic in your startup file, with no dependency on external project files.
 
 ---
 
@@ -1002,9 +1025,9 @@ lxfiles /
 lxfiles /eos/user/Y/USERNAME
 ```
 
-### 7.6 Direct utility function usage (advanced but supported)
+### 7.6 Direct utility function usage
 
-Use these when you need to validate one stage of the flow independently.
+Use these commands when you need to validate one stage of the flow independently.
 
 ```bash
 # Print current OTP from default secret file
@@ -1023,7 +1046,7 @@ destroy_cern_ticket
 destroy_kerberos_ticket USERNAME@CERN.CH --verbose
 ```
 
-### 7.7 Parameter matrix (what each user command accepts)
+### 7.7 Command parameters
 
 - `lxplus [nomux] [node]`
   - `nomux` disables ControlMaster attach for that invocation.
@@ -1035,7 +1058,7 @@ destroy_kerberos_ticket USERNAME@CERN.CH --verbose
   - `remote_dir` default is `/`.
   - Mount target is `/mnt/lxfiles` in this configuration.
 
-### 7.8 Example command recipes by scenario
+### 7.8 Example commands by scenario
 
 ```bash
 # Default auto-login to lxplus.cern.ch
@@ -1059,9 +1082,9 @@ lxfiles /eos/user/Y/USERNAME
 lxfiles nomux /eos/user/Y/USERNAME
 ```
 
-### 7.9 Complete user-facing command reference
+### 7.9 Full command reference
 
-All commands below are expected to be used directly by users in this setup:
+The commands below are intended for direct use in this setup:
 
 ```bash
 # OTP helper
@@ -1170,7 +1193,7 @@ mux-info -t 5 ~/.ssh/cm-abc123
 destroy_cern_ticket
 ```
 
-This destroys Kerberos ticket caches for CERN principal. It does not delete the keytab file.
+This removes Kerberos ticket caches for the CERN principal. It does not delete the keytab file.
 
 ---
 
@@ -1186,7 +1209,7 @@ This destroys Kerberos ticket caches for CERN principal. It does not delete the 
 - `lxfiles` mount says already mounted: unmount first (`fusermount -u /mnt/lxfiles` on Linux) or choose a different mountpoint by editing `lxfiles`.
 - ticket destroy appears ineffective: run `destroy_kerberos_ticket USERNAME@CERN.CH --verbose` to inspect actual cache path selection.
 
-### 9.1 Non-obvious flow behaviors (important accuracy notes)
+### 9.1 Important flow behaviors
 
 - `lxplus_auto` prints an OTP early for visibility, but at 2FA prompt time it generates a fresh OTP again inside `expect`; this is intentional to avoid rollover timing errors.
 - `lxplus_auto` rejects plain password fallback by design; if SSH asks password, treat it as a Kerberos/GSSAPI path failure, not an interactive fallback path.
@@ -1196,7 +1219,7 @@ This destroys Kerberos ticket caches for CERN principal. It does not delete the 
 
 ---
 
-## 10) Minimal quick checklist
+## 10) Quick checklist
 
 1. Install required tools.
 2. Create secure directories (`~/.ssh`, `~/.keytabs`, `~/.krb5cc_shared`).
