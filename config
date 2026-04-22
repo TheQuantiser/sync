@@ -1,5 +1,8 @@
-Host lxplus lxplus.cern.ch lxplus_vscode
+Host lxplus lxplus_vscode
   HostName lxplus.cern.ch
+  User mwadud
+
+Host lxplus lxplus_vscode lxplus.cern.ch lxplus??? lxplus???.cern.ch
   User mwadud
 
   SetEnv TERM=xterm-256color
@@ -24,29 +27,6 @@ Host lxplus lxplus.cern.ch lxplus_vscode
   UpdateHostKeys yes
 
   RequestTTY yes
-
-  ForwardX11 yes
-  ForwardX11Trusted yes
-
-  ProxyCommand /bin/bash -lc "export KRB5CCNAME=DIR:$HOME/.krb5cc_shared; mkdir -p $HOME/.krb5cc_shared; chmod 700 $HOME/.krb5cc_shared 2>/dev/null || true; klist -s || kinit -l 168h -r 30d -k -t $HOME/.keytabs/mwadud_cern.keytab mwadud@CERN.CH; exec nc %h %p"
-
-Host lxplus??? lxplus???.cern.ch
-  User mwadud
-
-  SetEnv TERM=xterm-256color
-  SendEnv COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION
-
-  GSSAPIAuthentication yes
-  GSSAPIDelegateCredentials yes
-  PreferredAuthentications gssapi-with-mic,keyboard-interactive
-
-  ControlMaster auto
-  ControlPath ~/.ssh/cm-%C
-  ControlPersist 300
-
-  ServerAliveInterval 120
-  ServerAliveCountMax 5
-  Compression yes
 
   ForwardX11 yes
   ForwardX11Trusted yes
