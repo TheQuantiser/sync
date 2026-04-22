@@ -1513,23 +1513,31 @@ get_kerberos_ticket() {
 # Usage: ssh_opts_for_mux 0|1  (1 = mux, 0 = nomux)
 ssh_opts_for_mux() {
   local use_mux="${1:-1}"
-  local -a opts
+  typeset -ga reply
+  reply=()
 
   if [[ "$use_mux" -eq 1 ]]; then
     # Let ~/.ssh/config control mux (ControlMaster auto, ControlPath ~/.ssh/cm-%C, etc.)
-    # Nothing required here.
-    opts=()
-  else
-    # Hard-disable client-side mux attachment.
-    # Critical: ControlPath=none prevents attaching to any existing master socket.
-    opts=(
-      -o ControlMaster=no
-      -o ControlPath=none
-      -o ControlPersist=no
-    )
+    return 0
   fi
 
-  print -r -- "${opts[@]}"
+  # Hard-disable client-side mux attachment.
+  # Critical: ControlPath=none prevents attaching to any existing master socket.
+  reply=(
+    -o ControlMaster=no
+    -o ControlPath=none
+    -o ControlPersist=no
+  )
+}
+
+# Common keepalive options used by interactive ssh and sshfs helper invocations.
+# Writes result to $reply.
+ssh_common_opts() {
+  typeset -ga reply
+  reply=(
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=3
+  )
 }
 
 # Normalize lxplus node argument.
@@ -1584,10 +1592,13 @@ remote_ssh_login() {
   fi
 
   local cc="${LAST_KRB5CCNAME:-$(cc_root)}"
+  local -a common_opts
+  ssh_common_opts
+  common_opts=("${reply[@]}")
 
   echo "Connecting to $host ..."
   KRB5CCNAME="$cc" command ssh -XYACv \
-    -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    "${common_opts[@]}" \
     "${extra_ssh_opts[@]}" \
     "$KERBEROS_USER@$host"
 }
@@ -1621,9 +1632,12 @@ sshfs_mount() {
 
   local cc="${LAST_KRB5CCNAME:-$(cc_root)}"
 
-  local -a ssh_cmd
+  local -a common_opts ssh_cmd
+  ssh_common_opts
+  common_opts=("${reply[@]}")
+
   ssh_cmd=(ssh
-    -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+    "${common_opts[@]}"
     "${extra_ssh_opts[@]}"
   )
 
@@ -1712,6 +1726,17 @@ _lxplus_parse_args() {
   printf '%s\t%s\n' "$use_mux" "$node_arg"
 }
 
+_lxplus_resolve_session() {
+  local use_mux node_arg host
+
+  IFS=$'\t' read -r use_mux node_arg <<EOF_LX_ARGS
+$(_lxplus_parse_args "$@")
+EOF_LX_ARGS
+
+  host="$(lxplus_host_from_arg "$node_arg")" || return 1
+  printf '%s\t%s\t%s\n' "$use_mux" "$node_arg" "$host"
+}
+
 _lxplus_show_otp_hint() {
   local otp
   otp="$(cern_totp_code 2>/dev/null)" || return 1
@@ -1719,15 +1744,14 @@ _lxplus_show_otp_hint() {
 }
 
 lxplus() {
-    local use_mux node_arg
-    IFS=$'\t' read -r use_mux node_arg <<EOF_LX_ARGS
-$(_lxplus_parse_args "$@")
+    local use_mux node_arg host
+    IFS=$'\t' read -r use_mux node_arg host <<EOF_LX_ARGS
+$(_lxplus_resolve_session "$@")
 EOF_LX_ARGS
 
-    local host; host="$(lxplus_host_from_arg "$node_arg")"
-
     local -a mux_opts
-    mux_opts=($(ssh_opts_for_mux "$use_mux"))
+    ssh_opts_for_mux "$use_mux"
+    mux_opts=("${reply[@]}")
 
     _lxplus_show_otp_hint || return 1
 
@@ -1743,7 +1767,8 @@ EOF_LX_ARGS
     local remote_dir="${node_arg:-/}"
 
     local -a mux_opts
-    mux_opts=($(ssh_opts_for_mux "$use_mux"))
+    ssh_opts_for_mux "$use_mux"
+    mux_opts=("${reply[@]}")
 
     _lxplus_show_otp_hint || return 1
 
@@ -1757,20 +1782,19 @@ lxplus_auto() {
   local MAGENTA=$'\033[1;35m'
   local RESET=$'\033[0m'
 
-  local use_mux node_arg
-  local host cc rc
+  local use_mux node_arg host
+  local cc rc
   local -a mux_opts
   local ssh_cmd_q
 
   # Keep argument semantics aligned with lxplus()/lxfiles().
-  IFS=$'\t' read -r use_mux node_arg <<EOF_LX_ARGS
-$(_lxplus_parse_args "$@")
+  IFS=$'\t' read -r use_mux node_arg host <<EOF_LX_ARGS
+$(_lxplus_resolve_session "$@")
 EOF_LX_ARGS
   _lxplus_show_otp_hint || return 1
 
-  host="$(lxplus_host_from_arg "$node_arg")" || return 1
-
-  mux_opts=($(ssh_opts_for_mux "$use_mux"))
+  ssh_opts_for_mux "$use_mux"
+  mux_opts=("${reply[@]}")
 
   # If mux is enabled and a master already exists, just reuse it.
   # No 2FA handling needed in that case.
