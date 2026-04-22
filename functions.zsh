@@ -1656,8 +1656,13 @@ get_CERN_kerberos_ticket() {
     get_kerberos_ticket "$CERN_PRINCIPAL" "$CERN_KEYTAB"
 }
 
-destroy_cern_mwadud() {
+destroy_cern_ticket() {
     destroy_kerberos_ticket "$CERN_PRINCIPAL"
+}
+
+# Backward-compatible alias.
+destroy_cern_mwadud() {
+    destroy_cern_ticket
 }
 
 # --- CERN TOTP helper ---------------------------------------------------------
@@ -1694,43 +1699,53 @@ cern_totp_code() {
   oathtool --totp -b -- "$secret"
 }
 
+_lxplus_parse_args() {
+  local use_mux=1
+  local node_arg=""
+
+  if [[ "$1" == "nomux" ]]; then
+    use_mux=0
+    shift
+  fi
+
+  node_arg="${1:-}"
+  printf '%s\t%s\n' "$use_mux" "$node_arg"
+}
+
+_lxplus_show_otp_hint() {
+  local otp
+  otp="$(cern_totp_code 2>/dev/null)" || return 1
+  printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
+}
+
 lxplus() {
-    local use_mux=1
-    local node_arg=""
+    local use_mux node_arg
+    IFS=$'\t' read -r use_mux node_arg <<EOF_LX_ARGS
+$(_lxplus_parse_args "$@")
+EOF_LX_ARGS
 
-    if [[ "$1" == "nomux" ]]; then
-      use_mux=0
-      shift
-    fi
-
-    node_arg="${1:-}"
     local host; host="$(lxplus_host_from_arg "$node_arg")"
 
     local -a mux_opts
     mux_opts=($(ssh_opts_for_mux "$use_mux"))
 
-    local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
-    printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
+    _lxplus_show_otp_hint || return 1
 
     remote_ssh_login get_CERN_kerberos_ticket "$host" 1 "${mux_opts[@]}"
 }
 
 lxfiles() {
-    local use_mux=1
-    local remote_dir="/"
+    local use_mux node_arg
+    IFS=$'\t' read -r use_mux node_arg <<EOF_LX_ARGS
+$(_lxplus_parse_args "$@")
+EOF_LX_ARGS
 
-    if [[ "$1" == "nomux" ]]; then
-      use_mux=0
-      shift
-    fi
-
-    remote_dir="${1:-/}"
+    local remote_dir="${node_arg:-/}"
 
     local -a mux_opts
     mux_opts=($(ssh_opts_for_mux "$use_mux"))
 
-    local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
-    printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
+    _lxplus_show_otp_hint || return 1
 
     sshfs_mount get_CERN_kerberos_ticket "lxplus.cern.ch" "/mnt/lxfiles" 1 "$remote_dir" "${mux_opts[@]}"
 }
@@ -1742,22 +1757,17 @@ lxplus_auto() {
   local MAGENTA=$'\033[1;35m'
   local RESET=$'\033[0m'
 
-  local use_mux=1
-  local node_arg=""
+  local use_mux node_arg
   local host cc rc
   local -a mux_opts
   local ssh_cmd_q
 
-  # Keep argument semantics aligned with lxplus()
-  if [[ "$1" == "nomux" ]]; then
-    use_mux=0
-    shift
-  fi
+  # Keep argument semantics aligned with lxplus()/lxfiles().
+  IFS=$'\t' read -r use_mux node_arg <<EOF_LX_ARGS
+$(_lxplus_parse_args "$@")
+EOF_LX_ARGS
+  _lxplus_show_otp_hint || return 1
 
-  local otp; otp="$(cern_totp_code 2>/dev/null)" || return 1
-  printf '\033[1;35m[2FA]\033[0m Code: \033[1m%s\033[0m  (%ss left)\n' "$otp" "$((30 - ($(date +%s) % 30)))"
-
-  node_arg="${1:-}"
   host="$(lxplus_host_from_arg "$node_arg")" || return 1
 
   mux_opts=($(ssh_opts_for_mux "$use_mux"))
